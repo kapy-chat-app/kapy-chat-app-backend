@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Socket Test</title>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  </head>
+  <body>
+    <h1>Socket.IO Test</h1>
+    <div id="status">Disconnected</div>
+    <button onclick="connect()">Connect</button>
+    <button onclick="test()">Test</button>
+    <div id="log"></div>
+
+    <script>
+      let socket = null;
+
+      function log(msg) {
+        document.getElementById("log").innerHTML +=
+          "<br>" + new Date().toLocaleTimeString() + ": " + msg;
+      }
+
+      function connect() {
+        log("Connecting to Socket.IO server on port 3000...");
+        socket = io("http://localhost:3000");
+
+        socket.on("connect", () => {
+          log("✅ Connected to Socket.IO server!");
+          document.getElementById("status").textContent = "Connected";
+        });
+
+        socket.on("disconnect", () => {
+          log("❌ Disconnected from Socket.IO server");
+          document.getElementById("status").textContent = "Disconnected";
+        });
+
+        socket.on("testResponse", (data) => {
+          log("📨 Test Response: " + JSON.stringify(data));
+        });
+
+        socket.on("connect_error", (error) => {
+          log("❌ Connection Error: " + error.message);
+        });
+      }
+
+      function test() {
+        if (socket) {
+          log("📤 Sending test message...");
+          socket.emit("test", { message: "Hello from client!" });
+        } else {
+          log("❌ Not connected");
+        }
+      }
+    </script>
+  </body>
+</html>

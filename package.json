@@ -2,8 +2,11 @@
   "name": "kapy-chat-app-backend",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node socket-server.js",
+    "dev:next": "next dev",
+    "dev:socket": "node socket-server.js",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -11,17 +14,22 @@
   "dependencies": {
     "@clerk/nextjs": "^6.32.0",
     "cloudinary": "^2.7.0",
+    "express": "^5.1.0",
     "mongoose": "^8.18.1",
     "next": "15.5.3",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
+    "@types/express": "^5.0.3",
+    "@types/mongoose": "^5.11.96",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
     "eslint": "^9",
     "eslint-config-next": "15.5.3",
     "tailwindcss": "^4",
