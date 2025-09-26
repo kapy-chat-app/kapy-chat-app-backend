@@ -685,6 +685,10 @@ export async function getBlockedUsers(
       .populate({
         path: "recipient",
         select: "username full_name avatar",
+        populate: {
+          path: "avatar",
+          select: "url"
+        }
       })
       .sort({ updated_at: -1 })
       .skip(skip)
@@ -695,7 +699,7 @@ export async function getBlockedUsers(
       id: relationship.recipient._id.toString(),
       username: relationship.recipient.username,
       full_name: relationship.recipient.full_name,
-      avatar: relationship.recipient.avatar?.toString(),
+      avatar: relationship.recipient.avatar?.url || null,
       blockedAt: relationship.updated_at,
       reason: undefined, // You can add a reason field to the Friendship model if needed
     }));
