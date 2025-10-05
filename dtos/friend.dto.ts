@@ -33,6 +33,7 @@ export interface GetFriendsDto {
 
 export interface FriendDto {
   id: string;
+  clerkId:string;
   username: string;
   full_name: string;
   avatar?: string;
