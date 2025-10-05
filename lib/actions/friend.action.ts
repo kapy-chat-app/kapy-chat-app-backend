@@ -272,7 +272,7 @@ export async function getFriends(
     const friendships = await Friendship.find(matchQuery)
       .populate({
         path: "requester",
-        select: "username full_name avatar is_online last_seen",
+        select: "id clerkId username full_name avatar is_online last_seen",
         populate: {
           path: "avatar",
           select: "url"
@@ -280,7 +280,7 @@ export async function getFriends(
       })
       .populate({
         path: "recipient",
-        select: "username full_name avatar is_online last_seen",
+        select: "id clerkId username full_name avatar is_online last_seen",
         populate: {
           path: "avatar",
           select: "url"
@@ -299,6 +299,7 @@ export async function getFriends(
 
       return {
         id: friend._id.toString(),
+        clerkId:friend.clerkId,
         username: friend.username,
         full_name: friend.full_name,
         avatar: friend.avatar?.url || null, // Lấy URL từ populated avatar
@@ -324,7 +325,7 @@ export async function getFriends(
     }
 
     const totalCount = await Friendship.countDocuments(matchQuery);
-
+    console.log("Friend Result>>>", friends);
     return { friends, totalCount };
   } catch (error) {
     console.error("Error getting friends:", error);

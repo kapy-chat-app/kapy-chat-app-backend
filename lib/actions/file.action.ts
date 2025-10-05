@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/actions/file.actions.ts
 import { FileRes } from "@/dtos/file.dto";
 import { v2 as cloudinary } from "cloudinary";
@@ -13,7 +14,6 @@ cloudinary.config({
   secure: true,
 });
 
-// Kiểm tra cấu hình Cloudinary
 const validateCloudinaryConfig = () => {
   if (
     !process.env.CLOUDINARY_CLOUD_NAME ||
@@ -26,7 +26,6 @@ const validateCloudinaryConfig = () => {
   }
 };
 
-// Interface cho file upload
 export interface FileUploadResult {
   success: boolean;
   file?: FileRes;
@@ -39,13 +38,6 @@ export interface FileDeleteResult {
   error?: string;
 }
 
-/**
- * Upload file lên Cloudinary và lưu vào database
- * @param file - File object từ FormData
- * @param folder - Thư mục lưu trữ trên Cloudinary (default: 'chatapp')
- * @param userId - ID của user upload (optional, for logging)
- * @returns Promise<FileUploadResult>
- */
 export const uploadFileToCloudinary = async (
   file: File,
   folder: string = "chatapp",
@@ -56,42 +48,44 @@ export const uploadFileToCloudinary = async (
       `🚀 Starting file upload for: ${file.name}, size: ${file.size} bytes`
     );
 
-    // Validate Cloudinary config
     validateCloudinaryConfig();
-
-    // Connect to database
     await connectToDatabase();
     console.log("✅ Connected to database");
 
-    // Validate file
     if (!file || file.size === 0) {
       throw new Error("Invalid file: File is empty or undefined");
     }
 
-    // Check file size (max 10MB)
     const maxSize = 10 * 1024 * 1024; // 10MB
     if (file.size > maxSize) {
       throw new Error("File size exceeds 10MB limit");
     }
 
-    // Validate file type
     const allowedTypes = [
       "image/jpeg",
       "image/jpg",
       "image/png",
       "image/gif",
       "image/webp",
+      "image/heic",
+      "image/heif",
       "video/mp4",
       "video/webm",
       "video/mov",
+      "video/quicktime",
       "video/avi",
       "audio/mp3",
+      "audio/mpeg",
       "audio/wav",
       "audio/ogg",
       "audio/aac",
+      "audio/m4a",
+      "audio/x-m4a",
+      "audio/mp4",
       "application/pdf",
       "application/msword",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "text/plain",
     ];
 
@@ -101,24 +95,24 @@ export const uploadFileToCloudinary = async (
 
     console.log("✅ File validation passed");
 
-    // Convert File to buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     console.log(`✅ File converted to buffer, size: ${buffer.length} bytes`);
 
-    // Create base64 data URI
     const base64String = buffer.toString("base64");
     const dataURI = `data:${file.type};base64,${base64String}`;
 
-    // Determine resource type for Cloudinary
+    // ✅ Xác định resource type
     let resourceType: "image" | "video" | "raw" = "raw";
+    const isAudio = file.type.startsWith("audio/");
+    
     if (file.type.startsWith("image/")) {
       resourceType = "image";
-    } else if (file.type.startsWith("video/")) {
+    } else if (file.type.startsWith("video/") || isAudio) {
+      // ✅ Audio files cần upload với resource_type = "video"
       resourceType = "video";
     }
 
-    // Generate unique public_id
     const timestamp = Date.now();
     const randomString = Math.random().toString(36).substring(2);
     const fileNameWithoutExt = file.name
@@ -128,31 +122,45 @@ export const uploadFileToCloudinary = async (
 
     console.log(`📤 Uploading to Cloudinary with public_id: ${publicId}`);
 
-    // Upload to Cloudinary
-    const uploadResult = await cloudinary.uploader.upload(dataURI, {
+    // ✅ Upload với config phù hợp
+    const uploadOptions: any = {
       folder: folder,
       resource_type: resourceType,
       public_id: publicId,
-      // Additional options based on file type
-      ...(resourceType === "image" && {
-        transformation: [{ quality: "auto:good" }, { fetch_format: "auto" }],
-      }),
-      ...(resourceType === "video" && {
-        video_codec: "auto",
-        quality: "auto:good",
-      }),
-    });
+    };
+
+    // Image transformations
+    if (resourceType === "image") {
+      uploadOptions.transformation = [
+        { quality: "auto:good" },
+        { fetch_format: "auto" }
+      ];
+    }
+
+    // Video transformations
+    if (resourceType === "video" && !isAudio) {
+      uploadOptions.video_codec = "auto";
+      uploadOptions.quality = "auto:good";
+    }
+
+    // ✅ Audio conversion sang MP3
+    if (isAudio) {
+      uploadOptions.format = "mp3"; // Convert sang MP3
+      uploadOptions.resource_type = "video"; // Required for audio
+    }
+
+    const uploadResult = await cloudinary.uploader.upload(dataURI, uploadOptions);
 
     console.log(
       `✅ Cloudinary upload successful, secure_url: ${uploadResult.secure_url}`
     );
 
-    // Save file metadata to database
+    // ✅ Lưu với file_type đúng (vẫn giữ original type)
     const fileData = {
       file_name: file.name,
       file_type: file.type,
       file_size: file.size,
-      file_path: uploadResult.public_id, // Store Cloudinary public_id
+      file_path: uploadResult.public_id,
       url: uploadResult.secure_url,
     };
 
@@ -160,7 +168,6 @@ export const uploadFileToCloudinary = async (
     const savedFile = await File.create(fileData);
     console.log(`✅ File saved to database with ID: ${savedFile._id}`);
 
-    // Prepare response
     const fileResponse: FileRes = {
       id: savedFile._id.toString(),
       file_name: savedFile.file_name,
@@ -190,24 +197,15 @@ export const uploadFileToCloudinary = async (
   }
 };
 
-/**
- * Xóa file từ Cloudinary và database
- * @param fileId - ID của file trong database
- * @returns Promise<FileDeleteResult>
- */
 export const deleteFileFromCloudinary = async (
   fileId: string
 ): Promise<FileDeleteResult> => {
   try {
     console.log(`🗑️ Starting file deletion for ID: ${fileId}`);
 
-    // Validate Cloudinary config
     validateCloudinaryConfig();
-
-    // Connect to database
     await connectToDatabase();
 
-    // Find file in database
     const file = await File.findById(fileId);
     if (!file) {
       throw new Error("File not found in database");
@@ -217,15 +215,14 @@ export const deleteFileFromCloudinary = async (
       `📁 Found file: ${file.file_name}, public_id: ${file.file_path}`
     );
 
-    // Determine resource type for deletion
+    // ✅ Xác định resource type cho deletion
     let resourceType: "image" | "video" | "raw" = "raw";
     if (file.file_type.startsWith("image/")) {
       resourceType = "image";
-    } else if (file.file_type.startsWith("video/")) {
-      resourceType = "video";
+    } else if (file.file_type.startsWith("video/") || file.file_type.startsWith("audio/")) {
+      resourceType = "video"; // Audio cũng dùng "video"
     }
 
-    // Delete from Cloudinary
     console.log(
       `🌥️ Deleting from Cloudinary with resource_type: ${resourceType}`
     );
@@ -235,14 +232,12 @@ export const deleteFileFromCloudinary = async (
 
     console.log(`Cloudinary deletion result:`, deleteResult);
 
-    // Check if deletion was successful
     if (deleteResult.result !== "ok" && deleteResult.result !== "not found") {
       throw new Error(
         `Cloudinary deletion failed: ${JSON.stringify(deleteResult)}`
       );
     }
 
-    // Delete from database
     console.log("🗄️ Deleting from database...");
     await File.findByIdAndDelete(fileId);
     console.log("✅ File deleted from database");
@@ -266,11 +261,6 @@ export const deleteFileFromCloudinary = async (
   }
 };
 
-/**
- * Lấy thông tin file theo ID
- * @param fileId - ID của file
- * @returns Promise<FileUploadResult>
- */
 export const getFileById = async (
   fileId: string
 ): Promise<FileUploadResult> => {
@@ -304,13 +294,6 @@ export const getFileById = async (
   }
 };
 
-/**
- * Upload multiple files
- * @param files - Array of File objects
- * @param folder - Thư mục lưu trữ
- * @param userId - ID của user upload
- * @returns Promise<{ successful: FileRes[], failed: { file: string, error: string }[] }>
- */
 export const uploadMultipleFiles = async (
   files: File[],
   folder: string = "chatapp",
@@ -351,13 +334,6 @@ export const uploadMultipleFiles = async (
   return { successful, failed };
 };
 
-/**
- * Lấy danh sách files theo type
- * @param fileType - Loại file (image/, video/, audio/, etc.)
- * @param limit - Số lượng files
- * @param page - Trang
- * @returns Promise<FileRes[]>
- */
 export const getFilesByType = async (
   fileType: string,
   limit: number = 20,
