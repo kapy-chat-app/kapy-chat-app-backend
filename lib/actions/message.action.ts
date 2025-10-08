@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/lib/actions/message.action.ts
+// src/lib/actions/message.action.ts - FIXED with populated read_by
 import { CreateMessageDTO } from '@/dtos/message.dto';
 import mongoose from 'mongoose';
 import { connectToDatabase } from '../mongoose';
@@ -11,7 +11,12 @@ import Message from '@/database/message.model';
 // ============================================
 // HELPER: Emit Socket Events
 // ============================================
-async function emitSocketEvent(event: string, conversationId: string, data: any) {
+async function emitSocketEvent(
+  event: string, 
+  conversationId: string, 
+  data: any,
+  emitToParticipants: boolean = true
+) {
   try {
     const socketUrl = process.env.SOCKET_URL || 'http://localhost:3000/api/socket/emit';
     
@@ -21,6 +26,7 @@ async function emitSocketEvent(event: string, conversationId: string, data: any)
       body: JSON.stringify({
         event,
         conversationId,
+        emitToParticipants,
         data: {
           ...data,
           timestamp: new Date(),
@@ -28,7 +34,7 @@ async function emitSocketEvent(event: string, conversationId: string, data: any)
       })
     });
     
-    console.log(`✅ Socket event '${event}' emitted`);
+    console.log(`✅ Socket event '${event}' emitted (emitToParticipants: ${emitToParticipants})`);
   } catch (socketError) {
     console.error(`⚠️ Socket emit failed for '${event}':`, socketError);
   }
@@ -57,7 +63,6 @@ export async function createMessage(data: CreateMessageDTO) {
     );
     if (!isParticipant) throw new Error('Not a participant');
 
-    // Validation logic
     if (type === 'text') {
       if (!content || content.trim().length === 0) {
         throw new Error('Text messages must have content');
@@ -96,6 +101,11 @@ export async function createMessage(data: CreateMessageDTO) {
           select: 'clerkId full_name username avatar',
           populate: { path: 'avatar', select: 'url' }
         }
+      })
+      .populate({
+        path: 'read_by.user',
+        select: 'clerkId full_name username avatar',
+        populate: { path: 'avatar', select: 'url' }
       });
     
     if (!populatedMessage) {
@@ -111,25 +121,42 @@ export async function createMessage(data: CreateMessageDTO) {
     if (messageObj.reply_to?.sender?.avatar?.url) {
       messageObj.reply_to.sender.avatar = messageObj.reply_to.sender.avatar.url;
     }
+    // Transform read_by avatars
+    if (messageObj.read_by) {
+      messageObj.read_by = messageObj.read_by.map((rb: any) => ({
+        user: rb.user._id || rb.user,
+        userInfo: rb.user._id ? {
+          clerkId: rb.user.clerkId,
+          full_name: rb.user.full_name,
+          username: rb.user.username,
+          avatar: rb.user.avatar?.url || rb.user.avatar
+        } : null,
+        read_at: rb.read_at
+      }));
+    }
 
-    // Emit socket event - sử dụng 'newMessage' để khớp với onMessageEvents.js
-    await emitSocketEvent('newMessage', conversationId, {
-      message_id: messageObj._id.toString(),
-      conversation_id: conversationId,
-      sender_id: user.clerkId,
-      sender_name: user.full_name,
-      sender_username: user.username,
-      sender_avatar: messageObj.sender.avatar,
-      message_content: content,
-      message_type: type,
-      message: {
-        ...messageObj,
-        _id: messageObj._id.toString(),
-        conversation: conversationId,
-        created_at: messageObj.created_at || new Date(),
-        updated_at: messageObj.updated_at || new Date(),
-      }
-    });
+    await emitSocketEvent(
+      'newMessage', 
+      conversationId, 
+      {
+        message_id: messageObj._id.toString(),
+        conversation_id: conversationId,
+        sender_id: user.clerkId,
+        sender_name: user.full_name,
+        sender_username: user.username,
+        sender_avatar: messageObj.sender.avatar,
+        message_content: content,
+        message_type: type,
+        message: {
+          ...messageObj,
+          _id: messageObj._id.toString(),
+          conversation: conversationId,
+          created_at: messageObj.created_at || new Date(),
+          updated_at: messageObj.updated_at || new Date(),
+        }
+      },
+      true
+    );
 
     return {
       success: true,
@@ -145,7 +172,7 @@ export async function createMessage(data: CreateMessageDTO) {
 }
 
 // ============================================
-// GET MESSAGES
+// GET MESSAGES - FIXED with populated read_by
 // ============================================
 export async function getMessages(
   conversationId: string, 
@@ -276,7 +303,107 @@ export async function getMessages(
           ]
         }
       },
-      { $unwind: { path: '$reply_to', preserveNullAndEmptyArrays: true } }
+      { $unwind: { path: '$reply_to', preserveNullAndEmptyArrays: true } },
+      // ✅ POPULATE read_by users
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'read_by.user',
+          foreignField: '_id',
+          as: 'read_by_users'
+        }
+      },
+      {
+        $addFields: {
+          read_by: {
+            $map: {
+              input: '$read_by',
+              as: 'rb',
+              in: {
+                user: '$$rb.user',
+                read_at: '$$rb.read_at',
+                userInfo: {
+                  $let: {
+                    vars: {
+                      matchedUser: {
+                        $arrayElemAt: [
+                          {
+                            $filter: {
+                              input: '$read_by_users',
+                              as: 'u',
+                              cond: { $eq: ['$$u._id', '$$rb.user'] }
+                            }
+                          },
+                          0
+                        ]
+                      }
+                    },
+                    in: {
+                      clerkId: '$$matchedUser.clerkId',
+                      full_name: '$$matchedUser.full_name',
+                      username: '$$matchedUser.username',
+                      avatar: '$$matchedUser.avatar'
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      // Populate avatars for read_by users
+      {
+        $lookup: {
+          from: 'files',
+          localField: 'read_by.userInfo.avatar',
+          foreignField: '_id',
+          as: 'read_by_avatars'
+        }
+      },
+      {
+        $addFields: {
+          read_by: {
+            $map: {
+              input: '$read_by',
+              as: 'rb',
+              in: {
+                user: '$$rb.user',
+                read_at: '$$rb.read_at',
+                userInfo: {
+                  clerkId: '$$rb.userInfo.clerkId',
+                  full_name: '$$rb.userInfo.full_name',
+                  username: '$$rb.userInfo.username',
+                  avatar: {
+                    $let: {
+                      vars: {
+                        avatarFile: {
+                          $arrayElemAt: [
+                            {
+                              $filter: {
+                                input: '$read_by_avatars',
+                                as: 'av',
+                                cond: { $eq: ['$$av._id', '$$rb.userInfo.avatar'] }
+                              }
+                            },
+                            0
+                          ]
+                        }
+                      },
+                      in: { $ifNull: ['$$avatarFile.url', null] }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          read_by_users: 0,
+          read_by_avatars: 0
+        }
+      }
     ]);
 
     const total = await Message.countDocuments({
@@ -356,9 +483,13 @@ export async function updateMessage(messageId: string, content: string) {
       select: 'clerkId full_name username avatar',
       populate: { path: 'avatar', select: 'url' }
     })
-    .populate('attachments', 'file_name file_type file_size url');
+    .populate('attachments', 'file_name file_type file_size url')
+    .populate({
+      path: 'read_by.user',
+      select: 'clerkId full_name username avatar',
+      populate: { path: 'avatar', select: 'url' }
+    });
 
-    // Emit socket event - sử dụng 'updateMessage' để khớp với onMessageEvents.js
     await emitSocketEvent('updateMessage', message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
@@ -412,7 +543,6 @@ export async function deleteMessage(
       }
     });
 
-    // Emit socket event - sử dụng 'deleteMessage' để khớp với onMessageEvents.js
     await emitSocketEvent('deleteMessage', message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
@@ -447,12 +577,10 @@ export async function addReaction(messageId: string, reactionType: string) {
     const message = await Message.findById(messageId);
     if (!message) throw new Error('Message not found');
 
-    // Remove existing reaction from this user first
     await Message.findByIdAndUpdate(messageId, {
       $pull: { reactions: { user: user._id } }
     });
 
-    // Add new reaction
     const updatedMessage = await Message.findByIdAndUpdate(
       messageId,
       {
@@ -472,7 +600,6 @@ export async function addReaction(messageId: string, reactionType: string) {
       populate: { path: 'avatar', select: 'url' }
     });
 
-    // Transform reactions
     const transformedReactions = updatedMessage?.reactions.map((r: any) => ({
       user: {
         _id: r.user._id,
@@ -485,7 +612,6 @@ export async function addReaction(messageId: string, reactionType: string) {
       created_at: r.created_at
     })) || [];
 
-    // Emit socket event - sử dụng 'newReaction' để khớp với onReactionEvents.js
     await emitSocketEvent('newReaction', message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
@@ -524,7 +650,6 @@ export async function removeReaction(messageId: string) {
     const message = await Message.findById(messageId);
     if (!message) throw new Error('Message not found');
 
-    // Get the reaction type before removing
     const userReaction = message.reactions.find(
       (r: any) => r.user.toString() === user._id.toString()
     );
@@ -540,7 +665,6 @@ export async function removeReaction(messageId: string) {
       populate: { path: 'avatar', select: 'url' }
     });
 
-    // Transform reactions
     const transformedReactions = updatedMessage?.reactions.map((r: any) => ({
       user: {
         _id: r.user._id,
@@ -553,7 +677,6 @@ export async function removeReaction(messageId: string) {
       created_at: r.created_at
     })) || [];
 
-    // Emit socket event - sử dụng 'deleteReaction' để khớp với onReactionEvents.js
     await emitSocketEvent('deleteReaction', message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
@@ -578,7 +701,7 @@ export async function removeReaction(messageId: string) {
 }
 
 // ============================================
-// MARK AS READ
+// MARK AS READ - SINGLE MESSAGE
 // ============================================
 export async function markAsRead(messageId: string) {
   try {
@@ -593,14 +716,15 @@ export async function markAsRead(messageId: string) {
     if (!message) throw new Error('Message not found');
 
     if (message.sender.toString() === user._id.toString()) {
+      console.log(`⏭️ Skipping mark as read: User is the sender`);
       return {
         success: true,
-        data: { messageId, alreadyRead: true }
+        data: { messageId, alreadyRead: true, skipped: true }
       };
     }
 
     const alreadyRead = message.read_by.some(
-      (r: any) => r.user.toString() === user._id.toString()
+      (r: any) => r.user?.toString() === user._id.toString()
     );
 
     if (!alreadyRead) {
@@ -613,12 +737,42 @@ export async function markAsRead(messageId: string) {
         }
       });
 
-      // Emit socket event - sử dụng 'markAsRead' để khớp với onReadEvents.js
-      await emitSocketEvent('markAsRead', message.conversation.toString(), {
-        message_id: messageId,
-        user_id: userId,
-        read_at: new Date()
-      });
+      console.log(`✅ Message ${messageId} marked as read by ${userId}`);
+
+      // ✅ Populate user info for socket event
+      const userInfo = {
+        clerkId: user.clerkId,
+        full_name: user.full_name,
+        username: user.username,
+        avatar: user.avatar
+      };
+
+      try {
+        const socketUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/socket/emit`;
+        
+        await fetch(socketUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: 'messageRead',
+            conversationId: message.conversation.toString(),
+            emitToParticipants: true,
+            data: {
+              message_id: messageId,
+              conversation_id: message.conversation.toString(),
+              user_id: userId,
+              user_info: userInfo,
+              read_at: new Date().toISOString()
+            }
+          })
+        });
+        
+        console.log(`✅ Emitted messageRead event for message ${messageId}`);
+      } catch (socketError) {
+        console.error('⚠️ Failed to emit socket event:', socketError);
+      }
+    } else {
+      console.log(`⏭️ Message ${messageId} already marked as read by ${userId}`);
     }
 
     return {
@@ -626,70 +780,10 @@ export async function markAsRead(messageId: string) {
       data: { messageId, alreadyRead }
     };
   } catch (error) {
-    console.error('Error marking message as read:', error);
+    console.error('❌ Error marking message as read:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Failed to mark message as read'
-    };
-  }
-}
-
-// ============================================
-// MARK CONVERSATION AS READ
-// ============================================
-export async function markConversationAsRead(conversationId: string) {
-  try {
-    await connectToDatabase();
-    const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
-
-    const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
-
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) throw new Error('Conversation not found');
-
-    const isParticipant = conversation.participants.some(
-      (p: any) => p.toString() === user._id.toString()
-    );
-    if (!isParticipant) throw new Error('Not a participant in this conversation');
-
-    const result = await Message.updateMany(
-      {
-        conversation: conversationId,
-        sender: { $ne: user._id },
-        'read_by.user': { $ne: user._id }
-      },
-      {
-        $addToSet: {
-          read_by: {
-            user: user._id,
-            read_at: new Date()
-          }
-        }
-      }
-    );
-
-    // Emit socket event - sử dụng 'markConversationAsRead' để khớp với onReadEvents.js
-    await emitSocketEvent('markConversationAsRead', conversationId, {
-      conversation_id: conversationId,
-      read_by: userId,
-      read_at: new Date(),
-      messages_updated: result.modifiedCount
-    });
-
-    return {
-      success: true,
-      data: {
-        conversationId,
-        messagesMarked: result.modifiedCount
-      }
-    };
-  } catch (error) {
-    console.error('Error marking conversation as read:', error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Failed to mark conversation as read'
     };
   }
 }

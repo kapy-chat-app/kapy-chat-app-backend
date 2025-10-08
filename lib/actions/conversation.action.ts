@@ -947,3 +947,89 @@ export async function updateGroupAvatar(
     };
   }
 }
+
+
+// ============================================
+// MARK CONVERSATION AS READ - FIXED EMIT STYLE
+// ============================================
+export async function markConversationAsRead(conversationId: string) {
+  try {
+    await connectToDatabase();
+    const { userId } = await auth();
+    if (!userId) throw new Error('Unauthorized');
+
+    const user = await User.findOne({ clerkId: userId });
+    if (!user) throw new Error('User not found');
+
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) throw new Error('Conversation not found');
+
+    // ✅ Check if user is participant
+    const isParticipant = conversation.participants.some(
+      (p: any) => p.toString() === user._id.toString()
+    );
+    if (!isParticipant) {
+      throw new Error('Not a participant in this conversation');
+    }
+
+    // ✅ Mark all unread messages in conversation as read
+    const result = await Message.updateMany(
+      {
+        conversation: conversationId,
+        sender: { $ne: user._id }, // ✅ Don't mark own messages
+        'read_by.user': { $ne: user._id } // ✅ Only unread messages
+      },
+      {
+        $addToSet: {
+          read_by: {
+            user: user._id,
+            read_at: new Date()
+          }
+        }
+      }
+    );
+
+    console.log(`✅ Conversation ${conversationId} marked as read by ${userId}`);
+    console.log(`📊 Updated ${result.modifiedCount} messages`);
+
+    // ✅ Emit socket event - GIỐNG NHƯ createMessage
+    try {
+      const socketUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/socket/emit`;
+      
+      await fetch(socketUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'conversationMarkedAsRead',
+          conversationId: conversationId,
+          emitToParticipants: true, // ✅ Emit to personal rooms too
+          data: {
+            conversation_id: conversationId,
+            read_by: userId,
+            read_at: new Date().toISOString(),
+            messages_updated: result.modifiedCount
+          }
+        })
+      });
+      
+      console.log(`✅ Emitted conversationMarkedAsRead event for ${conversationId}`);
+    } catch (socketError) {
+      console.error('⚠️ Failed to emit socket event:', socketError);
+      // Don't fail the request if socket emit fails
+    }
+
+    return {
+      success: true,
+      data: {
+        conversationId,
+        messagesMarked: result.modifiedCount
+      }
+    };
+  } catch (error) {
+    console.error('❌ Error marking conversation as read:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to mark conversation as read'
+    };
+  }
+}
