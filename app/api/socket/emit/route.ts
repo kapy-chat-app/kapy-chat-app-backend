@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import Conversation from "@/database/conversation.model";
 import { NextRequest, NextResponse } from "next/server";
 
 // TypeScript declaration cho global
@@ -10,9 +11,9 @@ declare global {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { event, conversationId, data, userId, roomName } = body;
+    const { event, conversationId, data, userId, roomName, emitToParticipants } = body;
 
-    console.log('📡 Socket emit request:', { event, conversationId, userId, roomName });
+    console.log('📡 Socket emit request:', { event, conversationId, userId, roomName, emitToParticipants });
 
     if (!event || !data) {
       return NextResponse.json(
@@ -35,10 +36,32 @@ export async function POST(req: NextRequest) {
 
     // Emit event theo các trường hợp khác nhau
     if (conversationId) {
-      // Emit tới conversation room
+      // 1. Emit tới conversation room (for MessageScreen)
       const room = `conversation:${conversationId}`;
       io.to(room).emit(event, data);
-      console.log(`✅ Emitted '${event}' to room '${room}'`);
+      console.log(`✅ Emitted '${event}' to conversation room '${room}'`);
+
+      // 2. ✅ Emit tới personal rooms của participants (for ConversationsScreen)
+      if (emitToParticipants && data.conversation_id) {
+        try {
+          
+          const conversation = await Conversation.findById(data.conversation_id)
+            .populate('participants', 'clerkId')
+
+          if (conversation && conversation.participants) {
+            console.log(`📤 Emitting '${event}' to ${conversation.participants.length} participants' personal rooms`);
+            
+            conversation.participants.forEach((participant: any) => {
+              const userRoom = `user:${participant.clerkId}`;
+              io.to(userRoom).emit(event, data);
+              console.log(`  ✅ Sent to personal room: ${userRoom}`);
+            });
+          }
+        } catch (dbError) {
+          console.error('⚠️ Could not fetch conversation participants:', dbError);
+          // Continue anyway - at least conversation room got the event
+        }
+      }
     } else if (userId) {
       // Emit tới user cụ thể
       const onlineUsers = global.onlineUsers || [];
@@ -71,6 +94,7 @@ export async function POST(req: NextRequest) {
       conversationId,
       userId,
       roomName,
+      emitToParticipants,
       timestamp: new Date().toISOString()
     });
   } catch (error) {

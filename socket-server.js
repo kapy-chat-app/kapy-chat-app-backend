@@ -53,7 +53,7 @@ app
       },
     });
 
-    // ✅ QUAN TRỌNG: Expose io và onlineUsers globally để Next.js API routes có thể sử dụng
+    // Expose io và onlineUsers globally
     global.io = io;
     global.onlineUsers = onlineUsers;
 
@@ -66,6 +66,10 @@ app
       socket.on("addNewUsers", (clerkUser) => {
         if (clerkUser) {
           const user_id = clerkUser._id;
+
+          // ✅ JOIN PERSONAL ROOM - QUAN TRỌNG cho ConversationsScreen
+          socket.join(`user:${user_id}`);
+          console.log(`👤 User ${user_id} joined personal room: user:${user_id}`);
 
           // Update online users array
           const existingUserIndex = onlineUsers.findIndex(
@@ -83,7 +87,7 @@ app
           }
 
           console.log(`👤 User ${user_id} connected with socket ${socket.id}`);
-          console.log("Updated online users:", onlineUsers);
+          console.log("📊 Total online users:", onlineUsers.length);
         }
 
         // Update global reference
@@ -97,8 +101,6 @@ app
           try {
             console.log(`📨 Event received: ${eventName}`, data);
 
-            // For now, just emit success response
-            // TODO: Implement actual handlers when database models are fixed
             socket.emit(`${eventName}Success`, {
               message: `${eventName} event handled successfully`,
               data: data,
@@ -139,7 +141,7 @@ app
       handleSocketEvent("deleteMessage");
       handleSocketEvent("getMessages");
 
-      //Typing Events
+      // Typing Events
       socket.on("userTyping", async (data) => {
         try {
           const { conversation_id, user_id, user_name, is_typing } = data;
@@ -161,13 +163,12 @@ app
           });
 
           console.log(
-            `✅ Typing event broadcasted to room ${roomName} (excluding sender)`
+            `✅ Typing event broadcasted to room ${roomName}`
           );
         } catch (error) {
           console.error(`❌ Error handling userTyping:`, error);
         }
       });
-      handleSocketEvent("userTyping");
       handleSocketEvent("stopTyping");
 
       // Call Events
@@ -221,17 +222,17 @@ app
       handleSocketEvent("markConversationAsRead");
       handleSocketEvent("getUnreadCount");
 
-      // ✅ Join/Leave Conversation Room
+      // Join/Leave Conversation Room
       socket.on("joinConversation", (conversationId) => {
         const roomName = `conversation:${conversationId}`;
         socket.join(roomName);
-        console.log(`📥 Socket ${socket.id} joined room ${roomName}`);
+        console.log(`📥 Socket ${socket.id} joined conversation room: ${roomName}`);
       });
 
       socket.on("leaveConversation", (conversationId) => {
         const roomName = `conversation:${conversationId}`;
         socket.leave(roomName);
-        console.log(`📤 Socket ${socket.id} left room ${roomName}`);
+        console.log(`📤 Socket ${socket.id} left conversation room: ${roomName}`);
       });
 
       // Test Events
@@ -273,22 +274,17 @@ app
       });
     });
 
-    // Next.js API routes và Pages sẽ chạy sau khi cấu hình Express
+    // Next.js API routes và Pages
     expressApp.use((req, res) => {
       return handler(req, res);
     });
 
-    // Khởi động server HTTP với Express
+    // Khởi động server
     httpServer.listen(port, () => {
       console.log(`🚀 Server ready on http://${hostname}:${port}`);
       console.log(`📡 Socket.IO server running`);
-      console.log(`✅ Global io instance available for API routes`);
-      console.log(
-        `🔧 Features: Full Socket.IO, CORS, User Management, All Events`
-      );
-      console.log(
-        `📋 Available Events: All notification, message, call, friend, conversation, reaction, read events`
-      );
+      console.log(`✅ Global io instance available`);
+      console.log(`🔧 Features: Personal Rooms + Conversation Rooms`);
     });
   })
   .catch((err) => {
