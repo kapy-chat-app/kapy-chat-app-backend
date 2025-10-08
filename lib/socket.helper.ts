@@ -1,19 +1,32 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export function emitSocketEvent(event: string, conversationId: string, data: any) {
+// ============================================
+// HELPER: Emit Socket Events
+// ============================================
+export async function emitSocketEvent(
+  event: string, 
+  conversationId: string, 
+  data: any,
+  emitToParticipants: boolean = true
+) {
   try {
-    const io = (global as any).io;
+    const socketUrl = process.env.SOCKET_URL || 'http://localhost:3000/api/socket/emit';
     
-    if (!io) {
-      console.error("❌ Socket.IO not available in helper");
-      return false;
-    }
-
-    const roomName = `conversation:${conversationId}`;
-    io.to(roomName).emit(event, data);
-    console.log(`✅ Emitted ${event} to ${roomName}`);
-    return true;
-  } catch (error) {
-    console.error("❌ Socket emit error:", error);
-    return false;
+    await fetch(socketUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        conversationId,
+        emitToParticipants,
+        data: {
+          ...data,
+          timestamp: new Date(),
+        }
+      })
+    });
+    
+    console.log(`✅ Socket event '${event}' emitted (emitToParticipants: ${emitToParticipants})`);
+  } catch (socketError) {
+    console.error(`⚠️ Socket emit failed for '${event}':`, socketError);
   }
 }
