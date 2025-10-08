@@ -69,7 +69,9 @@ app
 
           // ✅ JOIN PERSONAL ROOM - QUAN TRỌNG cho ConversationsScreen
           socket.join(`user:${user_id}`);
-          console.log(`👤 User ${user_id} joined personal room: user:${user_id}`);
+          console.log(
+            `👤 User ${user_id} joined personal room: user:${user_id}`
+          );
 
           // Update online users array
           const existingUserIndex = onlineUsers.findIndex(
@@ -162,9 +164,7 @@ app
             timestamp: new Date(),
           });
 
-          console.log(
-            `✅ Typing event broadcasted to room ${roomName}`
-          );
+          console.log(`✅ Typing event broadcasted to room ${roomName}`);
         } catch (error) {
           console.error(`❌ Error handling userTyping:`, error);
         }
@@ -226,13 +226,17 @@ app
       socket.on("joinConversation", (conversationId) => {
         const roomName = `conversation:${conversationId}`;
         socket.join(roomName);
-        console.log(`📥 Socket ${socket.id} joined conversation room: ${roomName}`);
+        console.log(
+          `📥 Socket ${socket.id} joined conversation room: ${roomName}`
+        );
       });
 
       socket.on("leaveConversation", (conversationId) => {
         const roomName = `conversation:${conversationId}`;
         socket.leave(roomName);
-        console.log(`📤 Socket ${socket.id} left conversation room: ${roomName}`);
+        console.log(
+          `📤 Socket ${socket.id} left conversation room: ${roomName}`
+        );
       });
 
       // Test Events
@@ -272,6 +276,152 @@ app
         global.onlineUsers = onlineUsers;
         io.emit("getUsers", onlineUsers);
       });
+      socket.on("aiChatMessage", async (data) => {
+        try {
+          const { user_id, message, conversation_id, include_emotion } = data;
+          console.log(`🤖 AI Chat message from user ${user_id}:`, message);
+
+          // Emit typing indicator
+          socket.emit("aiTyping", {
+            conversation_id,
+            is_typing: true,
+          });
+
+          // Send to personal room
+          io.to(`user:${user_id}`).emit("aiChatMessageReceived", {
+            conversation_id,
+            user_message: message,
+            timestamp: new Date(),
+            status: "processing",
+          });
+
+          console.log(`✅ AI chat message acknowledged for user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling aiChatMessage:`, error);
+          socket.emit("aiChatError", {
+            error: error.message,
+            timestamp: new Date(),
+          });
+        }
+      });
+
+      // AI Response Ready
+      socket.on("aiResponseReady", async (data) => {
+        try {
+          const {
+            user_id,
+            conversation_id,
+            response,
+            emotion_detected,
+            suggestions,
+          } = data;
+          console.log(`🤖 AI response ready for user ${user_id}`);
+
+          // Stop typing indicator
+          socket.emit("aiTyping", {
+            conversation_id,
+            is_typing: false,
+          });
+
+          // Send response to user's personal room
+          io.to(`user:${user_id}`).emit("aiChatResponse", {
+            conversation_id,
+            message: response,
+            emotion_detected,
+            suggestions,
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ AI response delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling aiResponseReady:`, error);
+        }
+      });
+
+      // Emotion Analysis Complete
+      socket.on("emotionAnalysisComplete", async (data) => {
+        try {
+          const { user_id, message_id, emotion_data } = data;
+          console.log(`😊 Emotion analysis complete for message ${message_id}`);
+
+          // Send to user's personal room
+          io.to(`user:${user_id}`).emit("emotionAnalyzed", {
+            message_id,
+            emotion: emotion_data.dominant_emotion,
+            confidence: emotion_data.confidence_score,
+            all_scores: emotion_data.emotion_scores,
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ Emotion analysis delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling emotionAnalysisComplete:`, error);
+        }
+      });
+
+      // Request Emotion Recommendations
+      socket.on("requestEmotionRecommendations", async (data) => {
+        try {
+          const { user_id } = data;
+          console.log(`💡 Recommendations requested by user ${user_id}`);
+
+          // Emit acknowledgment
+          socket.emit("recommendationsProcessing", {
+            user_id,
+            status: "processing",
+            timestamp: new Date(),
+          });
+
+          console.log(
+            `✅ Recommendations request acknowledged for user ${user_id}`
+          );
+        } catch (error) {
+          console.error(
+            `❌ Error handling requestEmotionRecommendations:`,
+            error
+          );
+        }
+      });
+
+      // Send Recommendations
+      socket.on("sendRecommendations", async (data) => {
+        try {
+          const { user_id, recommendations, based_on } = data;
+          console.log(`💡 Sending recommendations to user ${user_id}`);
+
+          // Send to user's personal room
+          io.to(`user:${user_id}`).emit("emotionRecommendations", {
+            recommendations,
+            based_on,
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ Recommendations delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling sendRecommendations:`, error);
+        }
+      });
+
+      // Emotion Trends Update
+      socket.on("emotionTrendsUpdate", async (data) => {
+        try {
+          const { user_id, trends, summary } = data;
+          console.log(`📊 Emotion trends update for user ${user_id}`);
+
+          // Send to user's personal room
+          io.to(`user:${user_id}`).emit("emotionTrendsUpdated", {
+            trends,
+            summary,
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ Emotion trends delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling emotionTrendsUpdate:`, error);
+        }
+      });
+
+      console.log("🤖 AI Chatbot events registered");
     });
 
     // Next.js API routes và Pages
