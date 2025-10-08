@@ -1,44 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/lib/actions/message.action.ts - FIXED with populated read_by
-import { CreateMessageDTO } from '@/dtos/message.dto';
-import mongoose from 'mongoose';
-import { connectToDatabase } from '../mongoose';
-import { auth } from '@clerk/nextjs/server';
-import User from '@/database/user.model';
-import Conversation from '@/database/conversation.model';
-import Message from '@/database/message.model';
-
-// ============================================
-// HELPER: Emit Socket Events
-// ============================================
-async function emitSocketEvent(
-  event: string, 
-  conversationId: string, 
-  data: any,
-  emitToParticipants: boolean = true
-) {
-  try {
-    const socketUrl = process.env.SOCKET_URL || 'http://localhost:3000/api/socket/emit';
-    
-    await fetch(socketUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event,
-        conversationId,
-        emitToParticipants,
-        data: {
-          ...data,
-          timestamp: new Date(),
-        }
-      })
-    });
-    
-    console.log(`✅ Socket event '${event}' emitted (emitToParticipants: ${emitToParticipants})`);
-  } catch (socketError) {
-    console.error(`⚠️ Socket emit failed for '${event}':`, socketError);
-  }
-}
+import { CreateMessageDTO } from "@/dtos/message.dto";
+import mongoose from "mongoose";
+import { connectToDatabase } from "../mongoose";
+import { auth } from "@clerk/nextjs/server";
+import User from "@/database/user.model";
+import Conversation from "@/database/conversation.model";
+import Message from "@/database/message.model";
+import { HuggingFaceService } from "../services/huggingface.service";
+import EmotionAnalysis from "@/database/emotion-analysis.model";
+import { emitSocketEvent } from "../socket.helper";
 
 // ============================================
 // CREATE MESSAGE
@@ -47,29 +18,34 @@ export async function createMessage(data: CreateMessageDTO) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const { conversationId, content, type, attachments, replyTo } = data;
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
-    const conversation = await Conversation.findById(conversationId)
-      .populate('participants', 'clerkId full_name username avatar');
-    if (!conversation) throw new Error('Conversation not found');
+    const conversation = await Conversation.findById(conversationId).populate(
+      "participants",
+      "clerkId full_name username avatar"
+    );
+    if (!conversation) throw new Error("Conversation not found");
 
     const isParticipant = conversation.participants.some(
       (p: any) => p._id.toString() === user._id.toString()
     );
-    if (!isParticipant) throw new Error('Not a participant');
+    if (!isParticipant) throw new Error("Not a participant");
 
-    if (type === 'text') {
+    if (type === "text") {
       if (!content || content.trim().length === 0) {
-        throw new Error('Text messages must have content');
+        throw new Error("Text messages must have content");
       }
     } else {
-      if ((!attachments || attachments.length === 0) && (!content || content.trim().length === 0)) {
-        throw new Error('Non-text messages must have attachments or content');
+      if (
+        (!attachments || attachments.length === 0) &&
+        (!content || content.trim().length === 0)
+      ) {
+        throw new Error("Non-text messages must have attachments or content");
       }
     }
 
@@ -78,38 +54,113 @@ export async function createMessage(data: CreateMessageDTO) {
       sender: user._id,
       content: content?.trim(),
       type,
-      attachments: attachments?.map(id => new mongoose.Types.ObjectId(id)) || [],
-      reply_to: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined
+      attachments:
+        attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [],
+      reply_to: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined,
     });
+
+    // ==========================================
+    // 🆕 ANALYZE EMOTION FROM MESSAGE
+    // ==========================================
+    if (type === "text" && content && content.trim().length > 0) {
+      try {
+        const emotionResult = await HuggingFaceService.analyzeEmotion(
+          content.trim()
+        );
+
+        const emotionAnalysis = await EmotionAnalysis.create({
+          user: user._id,
+          message: message._id,
+          conversation: conversationId,
+          emotion_scores: emotionResult.allScores,
+          dominant_emotion: emotionResult.emotion,
+          confidence_score: emotionResult.score,
+          text_analyzed: content.trim(),
+          context: "message",
+        });
+
+        // Emit emotion analysis via socket
+        await emitSocketEvent(
+          "emotionAnalysisComplete",
+          conversationId,
+          {
+            user_id: user._id.toString(),
+            message_id: message._id.toString(),
+            emotion_data: {
+              dominant_emotion: emotionAnalysis.dominant_emotion,
+              confidence_score: emotionAnalysis.confidence_score,
+              emotion_scores: emotionAnalysis.emotion_scores,
+            },
+          },
+          false // Don't broadcast to room, only to user
+        );
+
+        // Check if user needs support
+        const concerningEmotions = ["sadness", "anger", "fear"];
+        if (
+          concerningEmotions.includes(emotionAnalysis.dominant_emotion) &&
+          emotionAnalysis.confidence_score > 0.7
+        ) {
+          // Send recommendation notification
+          const recommendations =
+            await HuggingFaceService.generateEmotionRecommendations(
+              user._id.toString(),
+              emotionAnalysis
+            );
+
+          await emitSocketEvent(
+            "sendRecommendations",
+            conversationId,
+            {
+              user_id: user._id.toString(),
+              recommendations: recommendations.slice(0, 3),
+              based_on: {
+                emotion: emotionAnalysis.dominant_emotion,
+                confidence: emotionAnalysis.confidence_score,
+              },
+            },
+            false
+          );
+        }
+
+        console.log(
+          `✅ Emotion analyzed for message ${message._id}: ${emotionAnalysis.dominant_emotion}`
+        );
+      } catch (emotionError) {
+        console.error("Error analyzing message emotion:", emotionError);
+        // Don't fail the message creation if emotion analysis fails
+      }
+    }
+    // ==========================================
 
     await Conversation.findByIdAndUpdate(conversationId, {
       last_message: message._id,
-      last_activity: new Date()
+      last_activity: new Date(),
     });
 
     const populatedMessage = await Message.findById(message._id)
       .populate({
-        path: 'sender',
-        select: 'clerkId full_name username avatar',
-        populate: { path: 'avatar', select: 'url' }
+        path: "sender",
+        select: "clerkId full_name username avatar",
+        populate: { path: "avatar", select: "url" },
       })
-      .populate('attachments', 'file_name file_type file_size url')
+      .populate("attachments", "file_name file_type file_size url")
       .populate({
-        path: 'reply_to',
+        path: "reply_to",
         populate: {
-          path: 'sender',
-          select: 'clerkId full_name username avatar',
-          populate: { path: 'avatar', select: 'url' }
-        }
+          path: "sender",
+          select: "clerkId full_name username avatar",
+          populate: { path: "avatar", select: "url" },
+        },
       })
       .populate({
-        path: 'read_by.user',
-        select: 'clerkId full_name username avatar',
-        populate: { path: 'avatar', select: 'url' }
+        path: "read_by.user",
+        select: "clerkId full_name username avatar",
+        populate: { path: "avatar", select: "url" },
       });
-    
+
     if (!populatedMessage) {
-      throw new Error('Failed to retrieve created message');
+      throw new Error("Failed to retrieve created message");
     }
 
     const messageObj = populatedMessage.toObject();
@@ -125,19 +176,21 @@ export async function createMessage(data: CreateMessageDTO) {
     if (messageObj.read_by) {
       messageObj.read_by = messageObj.read_by.map((rb: any) => ({
         user: rb.user._id || rb.user,
-        userInfo: rb.user._id ? {
-          clerkId: rb.user.clerkId,
-          full_name: rb.user.full_name,
-          username: rb.user.username,
-          avatar: rb.user.avatar?.url || rb.user.avatar
-        } : null,
-        read_at: rb.read_at
+        userInfo: rb.user._id
+          ? {
+              clerkId: rb.user.clerkId,
+              full_name: rb.user.full_name,
+              username: rb.user.username,
+              avatar: rb.user.avatar?.url || rb.user.avatar,
+            }
+          : null,
+        read_at: rb.read_at,
       }));
     }
 
     await emitSocketEvent(
-      'newMessage', 
-      conversationId, 
+      "newMessage",
+      conversationId,
       {
         message_id: messageObj._id.toString(),
         conversation_id: conversationId,
@@ -153,20 +206,21 @@ export async function createMessage(data: CreateMessageDTO) {
           conversation: conversationId,
           created_at: messageObj.created_at || new Date(),
           updated_at: messageObj.updated_at || new Date(),
-        }
+        },
       },
       true
     );
 
     return {
       success: true,
-      data: messageObj
+      data: messageObj,
     };
   } catch (error) {
-    console.error('Error creating message:', error);
+    console.error("Error creating message:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to create message'
+      error:
+        error instanceof Error ? error.message : "Failed to create message",
     };
   }
 }
@@ -175,25 +229,26 @@ export async function createMessage(data: CreateMessageDTO) {
 // GET MESSAGES - FIXED with populated read_by
 // ============================================
 export async function getMessages(
-  conversationId: string, 
-  page: number = 1, 
+  conversationId: string,
+  page: number = 1,
   limit: number = 50
 ) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const conversation = await Conversation.findById(conversationId);
-    if (!conversation) throw new Error('Conversation not found');
+    if (!conversation) throw new Error("Conversation not found");
 
     const isParticipant = conversation.participants.some(
       (p: any) => p.toString() === user._id.toString()
     );
-    if (!isParticipant) throw new Error('Not a participant in this conversation');
+    if (!isParticipant)
+      throw new Error("Not a participant in this conversation");
 
     const skip = (page - 1) * limit;
 
@@ -203,125 +258,132 @@ export async function getMessages(
           conversation: new mongoose.Types.ObjectId(conversationId),
           $nor: [
             {
-              'deleted_by': {
+              deleted_by: {
                 $elemMatch: {
                   user: user._id,
-                  delete_type: 'only_me'
-                }
-              }
+                  delete_type: "only_me",
+                },
+              },
             },
             {
-              'deleted_by': {
+              deleted_by: {
                 $elemMatch: {
-                  delete_type: 'both'
-                }
-              }
-            }
-          ]
-        }
+                  delete_type: "both",
+                },
+              },
+            },
+          ],
+        },
       },
       { $sort: { created_at: -1 } },
       { $skip: skip },
       { $limit: limit },
       {
         $lookup: {
-          from: 'users',
-          localField: 'sender',
-          foreignField: '_id',
-          as: 'sender',
+          from: "users",
+          localField: "sender",
+          foreignField: "_id",
+          as: "sender",
           pipeline: [
             {
               $lookup: {
-                from: 'files',
-                localField: 'avatar',
-                foreignField: '_id',
-                as: 'avatarData'
-              }
+                from: "files",
+                localField: "avatar",
+                foreignField: "_id",
+                as: "avatarData",
+              },
             },
             {
               $project: {
                 clerkId: 1,
                 full_name: 1,
                 username: 1,
-                avatar: { $ifNull: [{ $arrayElemAt: ['$avatarData.url', 0] }, null] }
-              }
-            }
-          ]
-        }
+                avatar: {
+                  $ifNull: [{ $arrayElemAt: ["$avatarData.url", 0] }, null],
+                },
+              },
+            },
+          ],
+        },
       },
-      { $unwind: { path: '$sender', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
       {
         $lookup: {
-          from: 'files',
-          localField: 'attachments',
-          foreignField: '_id',
-          as: 'attachments'
-        }
+          from: "files",
+          localField: "attachments",
+          foreignField: "_id",
+          as: "attachments",
+        },
       },
       {
         $lookup: {
-          from: 'messages',
-          localField: 'reply_to',
-          foreignField: '_id',
-          as: 'reply_to',
+          from: "messages",
+          localField: "reply_to",
+          foreignField: "_id",
+          as: "reply_to",
           pipeline: [
             {
               $lookup: {
-                from: 'users',
-                localField: 'sender',
-                foreignField: '_id',
-                as: 'sender',
+                from: "users",
+                localField: "sender",
+                foreignField: "_id",
+                as: "sender",
                 pipeline: [
                   {
                     $lookup: {
-                      from: 'files',
-                      localField: 'avatar',
-                      foreignField: '_id',
-                      as: 'avatarData'
-                    }
+                      from: "files",
+                      localField: "avatar",
+                      foreignField: "_id",
+                      as: "avatarData",
+                    },
                   },
                   {
                     $project: {
                       clerkId: 1,
                       full_name: 1,
                       username: 1,
-                      avatar: { $ifNull: [{ $arrayElemAt: ['$avatarData.url', 0] }, null] }
-                    }
-                  }
-                ]
-              }
+                      avatar: {
+                        $ifNull: [
+                          { $arrayElemAt: ["$avatarData.url", 0] },
+                          null,
+                        ],
+                      },
+                    },
+                  },
+                ],
+              },
             },
-            { $unwind: { path: '$sender', preserveNullAndEmptyArrays: true } },
+            { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
             {
               $lookup: {
-                from: 'files',
-                localField: 'attachments',
-                foreignField: '_id',
-                as: 'attachments'
-              }
-            }
-          ]
-        }
+                from: "files",
+                localField: "attachments",
+                foreignField: "_id",
+                as: "attachments",
+              },
+            },
+          ],
+        },
       },
-      { $unwind: { path: '$reply_to', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$reply_to", preserveNullAndEmptyArrays: true } },
       // ✅ POPULATE read_by users
       {
         $lookup: {
-          from: 'users',
-          localField: 'read_by.user',
-          foreignField: '_id',
-          as: 'read_by_users'
-        }
+          from: "users",
+          localField: "read_by.user",
+          foreignField: "_id",
+          as: "read_by_users",
+        },
       },
       {
         $addFields: {
           read_by: {
             $map: {
-              input: '$read_by',
-              as: 'rb',
+              input: "$read_by",
+              as: "rb",
               in: {
-                user: '$$rb.user',
-                read_at: '$$rb.read_at',
+                user: "$$rb.user",
+                read_at: "$$rb.read_at",
                 userInfo: {
                   $let: {
                     vars: {
@@ -329,50 +391,50 @@ export async function getMessages(
                         $arrayElemAt: [
                           {
                             $filter: {
-                              input: '$read_by_users',
-                              as: 'u',
-                              cond: { $eq: ['$$u._id', '$$rb.user'] }
-                            }
+                              input: "$read_by_users",
+                              as: "u",
+                              cond: { $eq: ["$$u._id", "$$rb.user"] },
+                            },
                           },
-                          0
-                        ]
-                      }
+                          0,
+                        ],
+                      },
                     },
                     in: {
-                      clerkId: '$$matchedUser.clerkId',
-                      full_name: '$$matchedUser.full_name',
-                      username: '$$matchedUser.username',
-                      avatar: '$$matchedUser.avatar'
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+                      clerkId: "$$matchedUser.clerkId",
+                      full_name: "$$matchedUser.full_name",
+                      username: "$$matchedUser.username",
+                      avatar: "$$matchedUser.avatar",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       // Populate avatars for read_by users
       {
         $lookup: {
-          from: 'files',
-          localField: 'read_by.userInfo.avatar',
-          foreignField: '_id',
-          as: 'read_by_avatars'
-        }
+          from: "files",
+          localField: "read_by.userInfo.avatar",
+          foreignField: "_id",
+          as: "read_by_avatars",
+        },
       },
       {
         $addFields: {
           read_by: {
             $map: {
-              input: '$read_by',
-              as: 'rb',
+              input: "$read_by",
+              as: "rb",
               in: {
-                user: '$$rb.user',
-                read_at: '$$rb.read_at',
+                user: "$$rb.user",
+                read_at: "$$rb.read_at",
                 userInfo: {
-                  clerkId: '$$rb.userInfo.clerkId',
-                  full_name: '$$rb.userInfo.full_name',
-                  username: '$$rb.userInfo.username',
+                  clerkId: "$$rb.userInfo.clerkId",
+                  full_name: "$$rb.userInfo.full_name",
+                  username: "$$rb.userInfo.username",
                   avatar: {
                     $let: {
                       vars: {
@@ -380,51 +442,53 @@ export async function getMessages(
                           $arrayElemAt: [
                             {
                               $filter: {
-                                input: '$read_by_avatars',
-                                as: 'av',
-                                cond: { $eq: ['$$av._id', '$$rb.userInfo.avatar'] }
-                              }
+                                input: "$read_by_avatars",
+                                as: "av",
+                                cond: {
+                                  $eq: ["$$av._id", "$$rb.userInfo.avatar"],
+                                },
+                              },
                             },
-                            0
-                          ]
-                        }
+                            0,
+                          ],
+                        },
                       },
-                      in: { $ifNull: ['$$avatarFile.url', null] }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+                      in: { $ifNull: ["$$avatarFile.url", null] },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       {
         $project: {
           read_by_users: 0,
-          read_by_avatars: 0
-        }
-      }
+          read_by_avatars: 0,
+        },
+      },
     ]);
 
     const total = await Message.countDocuments({
       conversation: conversationId,
       $nor: [
         {
-          'deleted_by': {
+          deleted_by: {
             $elemMatch: {
               user: user._id,
-              delete_type: 'only_me'
-            }
-          }
+              delete_type: "only_me",
+            },
+          },
         },
         {
-          'deleted_by': {
+          deleted_by: {
             $elemMatch: {
-              delete_type: 'both'
-            }
-          }
-        }
-      ]
+              delete_type: "both",
+            },
+          },
+        },
+      ],
     });
 
     return {
@@ -437,15 +501,15 @@ export async function getMessages(
           total,
           pages: Math.ceil(total / limit),
           hasNext: page * limit < total,
-          hasPrev: page > 1
-        }
-      }
+          hasPrev: page > 1,
+        },
+      },
     };
   } catch (error) {
-    console.error('Error getting messages:', error);
+    console.error("Error getting messages:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to get messages'
+      error: error instanceof Error ? error.message : "Failed to get messages",
     };
   }
 }
@@ -457,16 +521,16 @@ export async function updateMessage(messageId: string, content: string) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const message = await Message.findById(messageId);
-    if (!message) throw new Error('Message not found');
+    if (!message) throw new Error("Message not found");
 
     if (message.sender.toString() !== user._id.toString()) {
-      throw new Error('Only sender can edit message');
+      throw new Error("Only sender can edit message");
     }
 
     const updatedMessage = await Message.findByIdAndUpdate(
@@ -474,39 +538,40 @@ export async function updateMessage(messageId: string, content: string) {
       {
         content: content.trim(),
         is_edited: true,
-        edited_at: new Date()
+        edited_at: new Date(),
       },
       { new: true }
     )
-    .populate({
-      path: 'sender',
-      select: 'clerkId full_name username avatar',
-      populate: { path: 'avatar', select: 'url' }
-    })
-    .populate('attachments', 'file_name file_type file_size url')
-    .populate({
-      path: 'read_by.user',
-      select: 'clerkId full_name username avatar',
-      populate: { path: 'avatar', select: 'url' }
-    });
+      .populate({
+        path: "sender",
+        select: "clerkId full_name username avatar",
+        populate: { path: "avatar", select: "url" },
+      })
+      .populate("attachments", "file_name file_type file_size url")
+      .populate({
+        path: "read_by.user",
+        select: "clerkId full_name username avatar",
+        populate: { path: "avatar", select: "url" },
+      });
 
-    await emitSocketEvent('updateMessage', message.conversation.toString(), {
+    await emitSocketEvent("updateMessage", message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
       new_content: content.trim(),
       edited_by: userId,
-      edited_at: new Date()
+      edited_at: new Date(),
     });
 
     return {
       success: true,
-      data: updatedMessage
+      data: updatedMessage,
     };
   } catch (error) {
-    console.error('Error updating message:', error);
+    console.error("Error updating message:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to update message'
+      error:
+        error instanceof Error ? error.message : "Failed to update message",
     };
   }
 }
@@ -515,22 +580,25 @@ export async function updateMessage(messageId: string, content: string) {
 // DELETE MESSAGE
 // ============================================
 export async function deleteMessage(
-  messageId: string, 
-  deleteType: 'only_me' | 'both' = 'only_me'
+  messageId: string,
+  deleteType: "only_me" | "both" = "only_me"
 ) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const message = await Message.findById(messageId);
-    if (!message) throw new Error('Message not found');
+    if (!message) throw new Error("Message not found");
 
-    if (deleteType === 'both' && message.sender.toString() !== user._id.toString()) {
-      throw new Error('Only sender can recall message');
+    if (
+      deleteType === "both" &&
+      message.sender.toString() !== user._id.toString()
+    ) {
+      throw new Error("Only sender can recall message");
     }
 
     await Message.findByIdAndUpdate(messageId, {
@@ -538,26 +606,27 @@ export async function deleteMessage(
         deleted_by: {
           user: user._id,
           deleted_at: new Date(),
-          delete_type: deleteType
-        }
-      }
+          delete_type: deleteType,
+        },
+      },
     });
 
-    await emitSocketEvent('deleteMessage', message.conversation.toString(), {
+    await emitSocketEvent("deleteMessage", message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
-      delete_type: deleteType
+      delete_type: deleteType,
     });
 
     return {
       success: true,
-      data: { messageId, deleteType }
+      data: { messageId, deleteType },
     };
   } catch (error) {
-    console.error('Error deleting message:', error);
+    console.error("Error deleting message:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to delete message'
+      error:
+        error instanceof Error ? error.message : "Failed to delete message",
     };
   }
 }
@@ -569,16 +638,16 @@ export async function addReaction(messageId: string, reactionType: string) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const message = await Message.findById(messageId);
-    if (!message) throw new Error('Message not found');
+    if (!message) throw new Error("Message not found");
 
     await Message.findByIdAndUpdate(messageId, {
-      $pull: { reactions: { user: user._id } }
+      $pull: { reactions: { user: user._id } },
     });
 
     const updatedMessage = await Message.findByIdAndUpdate(
@@ -588,49 +657,49 @@ export async function addReaction(messageId: string, reactionType: string) {
           reactions: {
             user: user._id,
             type: reactionType,
-            created_at: new Date()
-          }
-        }
+            created_at: new Date(),
+          },
+        },
       },
       { new: true }
-    )
-    .populate({
-      path: 'reactions.user',
-      select: 'clerkId full_name username avatar',
-      populate: { path: 'avatar', select: 'url' }
+    ).populate({
+      path: "reactions.user",
+      select: "clerkId full_name username avatar",
+      populate: { path: "avatar", select: "url" },
     });
 
-    const transformedReactions = updatedMessage?.reactions.map((r: any) => ({
-      user: {
-        _id: r.user._id,
-        clerkId: r.user.clerkId,
-        full_name: r.user.full_name,
-        username: r.user.username,
-        avatar: r.user.avatar?.url || r.user.avatar
-      },
-      type: r.type,
-      created_at: r.created_at
-    })) || [];
+    const transformedReactions =
+      updatedMessage?.reactions.map((r: any) => ({
+        user: {
+          _id: r.user._id,
+          clerkId: r.user.clerkId,
+          full_name: r.user.full_name,
+          username: r.user.username,
+          avatar: r.user.avatar?.url || r.user.avatar,
+        },
+        type: r.type,
+        created_at: r.created_at,
+      })) || [];
 
-    await emitSocketEvent('newReaction', message.conversation.toString(), {
+    await emitSocketEvent("newReaction", message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
       reaction: reactionType,
-      reactions: transformedReactions
+      reactions: transformedReactions,
     });
 
     return {
       success: true,
       data: {
         messageId,
-        reactions: transformedReactions
-      }
+        reactions: transformedReactions,
+      },
     };
   } catch (error) {
-    console.error('Error adding reaction:', error);
+    console.error("Error adding reaction:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to add reaction'
+      error: error instanceof Error ? error.message : "Failed to add reaction",
     };
   }
 }
@@ -642,13 +711,13 @@ export async function removeReaction(messageId: string) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const message = await Message.findById(messageId);
-    if (!message) throw new Error('Message not found');
+    if (!message) throw new Error("Message not found");
 
     const userReaction = message.reactions.find(
       (r: any) => r.user.toString() === user._id.toString()
@@ -658,44 +727,45 @@ export async function removeReaction(messageId: string) {
       messageId,
       { $pull: { reactions: { user: user._id } } },
       { new: true }
-    )
-    .populate({
-      path: 'reactions.user',
-      select: 'clerkId full_name username avatar',
-      populate: { path: 'avatar', select: 'url' }
+    ).populate({
+      path: "reactions.user",
+      select: "clerkId full_name username avatar",
+      populate: { path: "avatar", select: "url" },
     });
 
-    const transformedReactions = updatedMessage?.reactions.map((r: any) => ({
-      user: {
-        _id: r.user._id,
-        clerkId: r.user.clerkId,
-        full_name: r.user.full_name,
-        username: r.user.username,
-        avatar: r.user.avatar?.url || r.user.avatar
-      },
-      type: r.type,
-      created_at: r.created_at
-    })) || [];
+    const transformedReactions =
+      updatedMessage?.reactions.map((r: any) => ({
+        user: {
+          _id: r.user._id,
+          clerkId: r.user.clerkId,
+          full_name: r.user.full_name,
+          username: r.user.username,
+          avatar: r.user.avatar?.url || r.user.avatar,
+        },
+        type: r.type,
+        created_at: r.created_at,
+      })) || [];
 
-    await emitSocketEvent('deleteReaction', message.conversation.toString(), {
+    await emitSocketEvent("deleteReaction", message.conversation.toString(), {
       message_id: messageId,
       user_id: userId,
       reaction: userReaction?.type,
-      reactions: transformedReactions
+      reactions: transformedReactions,
     });
 
     return {
       success: true,
       data: {
         messageId,
-        reactions: transformedReactions
-      }
+        reactions: transformedReactions,
+      },
     };
   } catch (error) {
-    console.error('Error removing reaction:', error);
+    console.error("Error removing reaction:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to remove reaction'
+      error:
+        error instanceof Error ? error.message : "Failed to remove reaction",
     };
   }
 }
@@ -707,19 +777,19 @@ export async function markAsRead(messageId: string) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
-    if (!userId) throw new Error('Unauthorized');
+    if (!userId) throw new Error("Unauthorized");
 
     const user = await User.findOne({ clerkId: userId });
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     const message = await Message.findById(messageId);
-    if (!message) throw new Error('Message not found');
+    if (!message) throw new Error("Message not found");
 
     if (message.sender.toString() === user._id.toString()) {
       console.log(`⏭️ Skipping mark as read: User is the sender`);
       return {
         success: true,
-        data: { messageId, alreadyRead: true, skipped: true }
+        data: { messageId, alreadyRead: true, skipped: true },
       };
     }
 
@@ -732,9 +802,9 @@ export async function markAsRead(messageId: string) {
         $addToSet: {
           read_by: {
             user: user._id,
-            read_at: new Date()
-          }
-        }
+            read_at: new Date(),
+          },
+        },
       });
 
       console.log(`✅ Message ${messageId} marked as read by ${userId}`);
@@ -744,17 +814,19 @@ export async function markAsRead(messageId: string) {
         clerkId: user.clerkId,
         full_name: user.full_name,
         username: user.username,
-        avatar: user.avatar
+        avatar: user.avatar,
       };
 
       try {
-        const socketUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/socket/emit`;
-        
+        const socketUrl = `${
+          process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"
+        }/api/socket/emit`;
+
         await fetch(socketUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            event: 'messageRead',
+            event: "messageRead",
             conversationId: message.conversation.toString(),
             emitToParticipants: true,
             data: {
@@ -762,28 +834,33 @@ export async function markAsRead(messageId: string) {
               conversation_id: message.conversation.toString(),
               user_id: userId,
               user_info: userInfo,
-              read_at: new Date().toISOString()
-            }
-          })
+              read_at: new Date().toISOString(),
+            },
+          }),
         });
-        
+
         console.log(`✅ Emitted messageRead event for message ${messageId}`);
       } catch (socketError) {
-        console.error('⚠️ Failed to emit socket event:', socketError);
+        console.error("⚠️ Failed to emit socket event:", socketError);
       }
     } else {
-      console.log(`⏭️ Message ${messageId} already marked as read by ${userId}`);
+      console.log(
+        `⏭️ Message ${messageId} already marked as read by ${userId}`
+      );
     }
 
     return {
       success: true,
-      data: { messageId, alreadyRead }
+      data: { messageId, alreadyRead },
     };
   } catch (error) {
-    console.error('❌ Error marking message as read:', error);
+    console.error("❌ Error marking message as read:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to mark message as read'
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to mark message as read",
     };
   }
 }
