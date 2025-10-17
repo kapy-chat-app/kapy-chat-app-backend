@@ -1,5 +1,5 @@
 import { deleteChatConversation, getAllChatConversations } from "@/lib/actions/chatbot.actions";
-import {  NextResponse } from "next/server";
+import {  NextRequest, NextResponse } from "next/server";
 
 export async function GET() {
   try {
