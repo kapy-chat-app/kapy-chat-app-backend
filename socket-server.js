@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import cors from "cors";
 import express from "express";
 import { createServer } from "http";
@@ -11,7 +12,7 @@ const port = 3000;
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
 
-console.log("🚀 Starting Socket Server with Next.js...");
+console.log("🚀 Starting Socket Server with AI Emotion Features...");
 
 export let io;
 export let onlineUsers = [];
@@ -21,7 +22,6 @@ app
   .then(() => {
     const expressApp = express();
 
-    // Cấu hình CORS cho Express
     expressApp.use(
       cors({
         origin: true,
@@ -35,10 +35,8 @@ app
       })
     );
 
-    // Tạo HTTP server
     const httpServer = createServer(expressApp);
 
-    // Cấu hình Socket.IO với CORS
     io = new Server(httpServer, {
       cors: {
         origin: true,
@@ -53,7 +51,6 @@ app
       },
     });
 
-    // Expose io và onlineUsers globally
     global.io = io;
     global.onlineUsers = onlineUsers;
 
@@ -62,18 +59,18 @@ app
     io.on("connection", (socket) => {
       console.log(`🔌 New socket connection: ${socket.id}`);
 
-      // Add new user event
+      // ==========================================
+      // USER CONNECTION
+      // ==========================================
       socket.on("addNewUsers", (clerkUser) => {
         if (clerkUser) {
           const user_id = clerkUser._id;
 
-          // ✅ JOIN PERSONAL ROOM - QUAN TRỌNG cho ConversationsScreen
           socket.join(`user:${user_id}`);
           console.log(
             `👤 User ${user_id} joined personal room: user:${user_id}`
           );
 
-          // Update online users array
           const existingUserIndex = onlineUsers.findIndex(
             (user) => user.userId === user_id
           );
@@ -92,12 +89,13 @@ app
           console.log("📊 Total online users:", onlineUsers.length);
         }
 
-        // Update global reference
         global.onlineUsers = onlineUsers;
         io.emit("getUsers", onlineUsers);
       });
 
-      // Helper function to handle socket events
+      // ==========================================
+      // HELPER FUNCTION
+      // ==========================================
       function handleSocketEvent(eventName) {
         socket.on(eventName, async (data) => {
           try {
@@ -118,25 +116,21 @@ app
         });
       }
 
-      // Notification Events
+      // Standard events
       handleSocketEvent("callNotification");
       handleSocketEvent("callAnswered");
       handleSocketEvent("callDeclined");
       handleSocketEvent("callEnded");
       handleSocketEvent("callStarted");
-
       handleSocketEvent("messageNotification");
       handleSocketEvent("messageDelivered");
       handleSocketEvent("messageRead");
       handleSocketEvent("messageSent");
-
       handleSocketEvent("friendRequestNotification");
       handleSocketEvent("friendRequestAccepted");
       handleSocketEvent("friendRequestCancelled");
       handleSocketEvent("friendRequestDeclined");
       handleSocketEvent("friendRequestSent");
-
-      // Message Events
       handleSocketEvent("newMessage");
       handleSocketEvent("sendMessage");
       handleSocketEvent("editMessage");
@@ -154,7 +148,6 @@ app
             is_typing,
           });
 
-          // Emit to conversation room (excluding sender)
           const roomName = `conversation:${conversation_id}`;
           socket.to(roomName).emit("userTyping", {
             conversation_id,
@@ -171,7 +164,7 @@ app
       });
       handleSocketEvent("stopTyping");
 
-      // Call Events
+      // Call, Friend, Conversation, Group, Reaction, Read Events
       handleSocketEvent("startCall");
       handleSocketEvent("startGroupCall");
       handleSocketEvent("answerCall");
@@ -180,8 +173,6 @@ app
       handleSocketEvent("joinCall");
       handleSocketEvent("leaveCall");
       handleSocketEvent("getCallHistory");
-
-      // Friend Events
       handleSocketEvent("sendFriendRequest");
       handleSocketEvent("acceptFriendRequest");
       handleSocketEvent("declineFriendRequest");
@@ -191,30 +182,22 @@ app
       handleSocketEvent("unblockFriend");
       handleSocketEvent("getFriends");
       handleSocketEvent("getFriendRequests");
-
-      // Conversation Events
       handleSocketEvent("newConversation");
       handleSocketEvent("updateConversation");
       handleSocketEvent("deleteConversation");
       handleSocketEvent("getConversations");
       handleSocketEvent("getConversation");
       handleSocketEvent("getConversationParticipants");
-
-      // Group Events
       handleSocketEvent("createGroup");
       handleSocketEvent("updateGroupInfo");
       handleSocketEvent("addGroupMember");
       handleSocketEvent("removeGroupMember");
       handleSocketEvent("leaveGroup");
       handleSocketEvent("deleteGroup");
-
-      // Reaction Events
       handleSocketEvent("newReaction");
       handleSocketEvent("deleteReaction");
       handleSocketEvent("getReactions");
       handleSocketEvent("getMessageReactions");
-
-      // Read Events
       handleSocketEvent("markAsRead");
       handleSocketEvent("deleteRead");
       handleSocketEvent("getReads");
@@ -222,7 +205,7 @@ app
       handleSocketEvent("markConversationAsRead");
       handleSocketEvent("getUnreadCount");
 
-      // Join/Leave Conversation Room
+      // Join/Leave Conversation
       socket.on("joinConversation", (conversationId) => {
         const roomName = `conversation:${conversationId}`;
         socket.join(roomName);
@@ -239,43 +222,9 @@ app
         );
       });
 
-      // Test Events
-      socket.on("test", (data) => {
-        console.log("📨 Test event received:", data);
-        socket.emit("testResponse", {
-          message: "Test successful!",
-          timestamp: new Date(),
-          receivedData: data,
-        });
-      });
-
-      socket.on("echo", (data) => {
-        console.log("🔄 Echo request:", data);
-        socket.emit("echoResponse", {
-          echo: data,
-          timestamp: new Date(),
-        });
-      });
-
-      // Disconnect event
-      socket.on("disconnect", () => {
-        console.log(`🔌 Socket disconnected: ${socket.id}`);
-
-        // Remove from online users
-        const disconnectedUser = onlineUsers.find(
-          (user) => user.socketId === socket.id
-        );
-        if (disconnectedUser) {
-          onlineUsers = onlineUsers.filter(
-            (user) => user.socketId !== socket.id
-          );
-          console.log(`👤 User ${disconnectedUser.userId} disconnected`);
-        }
-
-        // Update global reference
-        global.onlineUsers = onlineUsers;
-        io.emit("getUsers", onlineUsers);
-      });
+      // ==========================================
+      // 🆕 AI CHATBOT EVENTS
+      // ==========================================
       socket.on("aiChatMessage", async (data) => {
         try {
           const { user_id, message, conversation_id, include_emotion } = data;
@@ -287,7 +236,7 @@ app
             is_typing: true,
           });
 
-          // Send to personal room
+          // Acknowledge receipt
           io.to(`user:${user_id}`).emit("aiChatMessageReceived", {
             conversation_id,
             user_message: message,
@@ -317,13 +266,11 @@ app
           } = data;
           console.log(`🤖 AI response ready for user ${user_id}`);
 
-          // Stop typing indicator
           socket.emit("aiTyping", {
             conversation_id,
             is_typing: false,
           });
 
-          // Send response to user's personal room
           io.to(`user:${user_id}`).emit("aiChatResponse", {
             conversation_id,
             message: response,
@@ -338,15 +285,20 @@ app
         }
       });
 
-      // Emotion Analysis Complete
+      // ==========================================
+      // 🆕 EMOTION ANALYSIS EVENTS - ALL EMOTIONS
+      // ==========================================
       socket.on("emotionAnalysisComplete", async (data) => {
         try {
-          const { user_id, message_id, emotion_data } = data;
+          const { user_id, message_id, emotion_data, is_sender, context } = data;
           console.log(`😊 Emotion analysis complete for message ${message_id}`);
+          console.log(`   Emotion: ${emotion_data.dominant_emotion} (${(emotion_data.confidence_score * 100).toFixed(0)}%)`);
 
           // Send to user's personal room
           io.to(`user:${user_id}`).emit("emotionAnalyzed", {
             message_id,
+            is_sender,
+            context,
             emotion: emotion_data.dominant_emotion,
             confidence: emotion_data.confidence_score,
             all_scores: emotion_data.emotion_scores,
@@ -359,16 +311,19 @@ app
         }
       });
 
-      // Request Emotion Recommendations
+      // ==========================================
+      // 🆕 AI RECOMMENDATIONS - FOR ALL EMOTIONS
+      // ==========================================
       socket.on("requestEmotionRecommendations", async (data) => {
         try {
-          const { user_id } = data;
-          console.log(`💡 Recommendations requested by user ${user_id}`);
+          const { user_id, emotion, confidence } = data;
+          console.log(`💡 Recommendations requested by user ${user_id} for emotion: ${emotion}`);
 
-          // Emit acknowledgment
+          // Emit processing status
           socket.emit("recommendationsProcessing", {
             user_id,
-            status: "processing",
+            emotion,
+            status: "generating_ai_recommendations",
             timestamp: new Date(),
           });
 
@@ -383,20 +338,26 @@ app
         }
       });
 
-      // Send Recommendations
+      // Send AI-generated recommendations
       socket.on("sendRecommendations", async (data) => {
         try {
-          const { user_id, recommendations, based_on } = data;
-          console.log(`💡 Sending recommendations to user ${user_id}`);
+          const { user_id, emotion, recommendations, based_on } = data;
+          console.log(`💡 Sending AI recommendations to user ${user_id}`);
+          console.log(`   Emotion: ${emotion}, Count: ${recommendations.length}`);
 
           // Send to user's personal room
           io.to(`user:${user_id}`).emit("emotionRecommendations", {
+            emotion,
             recommendations,
-            based_on,
+            based_on: {
+              ...based_on,
+              source: 'huggingface-ai',
+              generated_at: new Date(),
+            },
             timestamp: new Date(),
           });
 
-          console.log(`✅ Recommendations delivered to user ${user_id}`);
+          console.log(`✅ AI recommendations delivered to user ${user_id}`);
         } catch (error) {
           console.error(`❌ Error handling sendRecommendations:`, error);
         }
@@ -408,7 +369,6 @@ app
           const { user_id, trends, summary } = data;
           console.log(`📊 Emotion trends update for user ${user_id}`);
 
-          // Send to user's personal room
           io.to(`user:${user_id}`).emit("emotionTrendsUpdated", {
             trends,
             summary,
@@ -421,20 +381,93 @@ app
         }
       });
 
-      console.log("🤖 AI Chatbot events registered");
+      // ==========================================
+      // 🆕 BULK EMOTION NOTIFICATION (for group chats)
+      // ==========================================
+      socket.on("bulkEmotionAnalysis", async (data) => {
+        try {
+          const { message_id, conversation_id, participants_data } = data;
+          console.log(`📊 Bulk emotion analysis for message ${message_id}`);
+          console.log(`   Participants: ${participants_data.length}`);
+
+          // Send emotion data to each participant
+          participants_data.forEach((participantData) => {
+            const { user_id, emotion, confidence, recommendations, is_sender } = participantData;
+            
+            io.to(`user:${user_id}`).emit("emotionAnalyzedWithRecommendations", {
+              message_id,
+              conversation_id,
+              is_sender,
+              emotion_data: {
+                emotion,
+                confidence,
+              },
+              recommendations: recommendations || [],
+              timestamp: new Date(),
+            });
+
+            console.log(`   ✅ Sent to ${user_id}: ${emotion} (${(confidence * 100).toFixed(0)}%)`);
+          });
+
+          console.log(`✅ Bulk emotion analysis completed`);
+        } catch (error) {
+          console.error(`❌ Error handling bulkEmotionAnalysis:`, error);
+        }
+      });
+
+      // Test Events
+      socket.on("test", (data) => {
+        console.log("📨 Test event received:", data);
+        socket.emit("testResponse", {
+          message: "Test successful!",
+          timestamp: new Date(),
+          receivedData: data,
+        });
+      });
+
+      socket.on("echo", (data) => {
+        console.log("🔄 Echo request:", data);
+        socket.emit("echoResponse", {
+          echo: data,
+          timestamp: new Date(),
+        });
+      });
+
+      // ==========================================
+      // DISCONNECT
+      // ==========================================
+      socket.on("disconnect", () => {
+        console.log(`🔌 Socket disconnected: ${socket.id}`);
+
+        const disconnectedUser = onlineUsers.find(
+          (user) => user.socketId === socket.id
+        );
+        if (disconnectedUser) {
+          onlineUsers = onlineUsers.filter(
+            (user) => user.socketId !== socket.id
+          );
+          console.log(`👤 User ${disconnectedUser.userId} disconnected`);
+        }
+
+        global.onlineUsers = onlineUsers;
+        io.emit("getUsers", onlineUsers);
+      });
+
+      console.log("🤖 AI Emotion & Recommendation events registered");
     });
 
-    // Next.js API routes và Pages
+    // Next.js handler
     expressApp.use((req, res) => {
       return handler(req, res);
     });
 
-    // Khởi động server
+    // Start server
     httpServer.listen(port, () => {
       console.log(`🚀 Server ready on http://${hostname}:${port}`);
       console.log(`📡 Socket.IO server running`);
       console.log(`✅ Global io instance available`);
-      console.log(`🔧 Features: Personal Rooms + Conversation Rooms`);
+      console.log(`🤖 AI Emotion Analysis: Enabled for ALL emotions`);
+      console.log(`💡 AI Recommendations: Powered by HuggingFace`);
     });
   })
   .catch((err) => {

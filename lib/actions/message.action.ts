@@ -10,9 +10,10 @@ import Message from "@/database/message.model";
 import { HuggingFaceService } from "../services/huggingface.service";
 import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitSocketEvent } from "../socket.helper";
+import { analyzeMessageEmotionsAsync } from "./emotion.action";
 
 // ============================================
-// CREATE MESSAGE
+// CREATE MESSAGE - WITH RECEIVER EMOTION ANALYSIS
 // ============================================
 export async function createMessage(data: CreateMessageDTO) {
   try {
@@ -27,7 +28,7 @@ export async function createMessage(data: CreateMessageDTO) {
 
     const conversation = await Conversation.findById(conversationId).populate(
       "participants",
-      "clerkId full_name username avatar"
+      "clerkId full_name username avatar _id"
     );
     if (!conversation) throw new Error("Conversation not found");
 
@@ -36,6 +37,7 @@ export async function createMessage(data: CreateMessageDTO) {
     );
     if (!isParticipant) throw new Error("Not a participant");
 
+    // Validate message content
     if (type === "text") {
       if (!content || content.trim().length === 0) {
         throw new Error("Text messages must have content");
@@ -49,6 +51,7 @@ export async function createMessage(data: CreateMessageDTO) {
       }
     }
 
+    // Create message
     const message = await Message.create({
       conversation: conversationId,
       sender: user._id,
@@ -60,84 +63,63 @@ export async function createMessage(data: CreateMessageDTO) {
     });
 
     // ==========================================
-    // 🆕 ANALYZE EMOTION FROM MESSAGE
+    // 🤖 AI EMOTION ANALYSIS FOR TEXT MESSAGES
     // ==========================================
     if (type === "text" && content && content.trim().length > 0) {
       try {
+        console.log(`🔍 Analyzing emotion for message: ${message._id}`);
+        
+        // Call HuggingFace AI to analyze emotion
         const emotionResult = await HuggingFaceService.analyzeEmotion(
           content.trim()
         );
 
+        console.log(`✅ Emotion detected: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
+
+        // Create EmotionAnalysis record
         const emotionAnalysis = await EmotionAnalysis.create({
           user: user._id,
           message: message._id,
           conversation: conversationId,
-          emotion_scores: emotionResult.allScores,
+          context: "message", // 'message' | 'voice_note' | 'call' | 'general'
           dominant_emotion: emotionResult.emotion,
           confidence_score: emotionResult.score,
+          emotion_scores: emotionResult.allScores, // Must match schema field name
           text_analyzed: content.trim(),
-          context: "message",
+          analyzed_at: new Date()
         });
 
-        // Emit emotion analysis via socket
+        console.log(`💾 EmotionAnalysis created: ${emotionAnalysis._id}`);
+
+        // Optional: Emit emotion update via socket
         await emitSocketEvent(
-          "emotionAnalysisComplete",
+          "emotionAnalyzed",
           conversationId,
           {
-            user_id: user._id.toString(),
             message_id: message._id.toString(),
-            emotion_data: {
-              dominant_emotion: emotionAnalysis.dominant_emotion,
-              confidence_score: emotionAnalysis.confidence_score,
-              emotion_scores: emotionAnalysis.emotion_scores,
-            },
+            emotion: emotionResult.emotion,
+            score: emotionResult.score,
+            method: emotionResult.method,
+            analysis_id: emotionAnalysis._id.toString()
           },
-          false // Don't broadcast to room, only to user
+          false // Don't send to sender
         );
 
-        // Check if user needs support
-        const concerningEmotions = ["sadness", "anger", "fear"];
-        if (
-          concerningEmotions.includes(emotionAnalysis.dominant_emotion) &&
-          emotionAnalysis.confidence_score > 0.7
-        ) {
-          // Send recommendation notification
-          const recommendations =
-            await HuggingFaceService.generateEmotionRecommendations(
-              user._id.toString(),
-              emotionAnalysis
-            );
-
-          await emitSocketEvent(
-            "sendRecommendations",
-            conversationId,
-            {
-              user_id: user._id.toString(),
-              recommendations: recommendations.slice(0, 3),
-              based_on: {
-                emotion: emotionAnalysis.dominant_emotion,
-                confidence: emotionAnalysis.confidence_score,
-              },
-            },
-            false
-          );
-        }
-
-        console.log(
-          `✅ Emotion analyzed for message ${message._id}: ${emotionAnalysis.dominant_emotion}`
-        );
       } catch (emotionError) {
-        console.error("Error analyzing message emotion:", emotionError);
-        // Don't fail the message creation if emotion analysis fails
+        // Don't fail message creation if emotion analysis fails
+        console.error("❌ Emotion analysis failed:", emotionError);
+        // Continue with message creation
       }
     }
     // ==========================================
 
+    // Update conversation last message
     await Conversation.findByIdAndUpdate(conversationId, {
       last_message: message._id,
       last_activity: new Date(),
     });
 
+    // Populate message for response
     const populatedMessage = await Message.findById(message._id)
       .populate({
         path: "sender",
@@ -172,7 +154,6 @@ export async function createMessage(data: CreateMessageDTO) {
     if (messageObj.reply_to?.sender?.avatar?.url) {
       messageObj.reply_to.sender.avatar = messageObj.reply_to.sender.avatar.url;
     }
-    // Transform read_by avatars
     if (messageObj.read_by) {
       messageObj.read_by = messageObj.read_by.map((rb: any) => ({
         user: rb.user._id || rb.user,
@@ -188,6 +169,7 @@ export async function createMessage(data: CreateMessageDTO) {
       }));
     }
 
+    // Emit new message event via socket
     await emitSocketEvent(
       "newMessage",
       conversationId,
@@ -208,7 +190,7 @@ export async function createMessage(data: CreateMessageDTO) {
           updated_at: messageObj.updated_at || new Date(),
         },
       },
-      true
+      true // Send to all participants including sender
     );
 
     return {
@@ -216,7 +198,7 @@ export async function createMessage(data: CreateMessageDTO) {
       data: messageObj,
     };
   } catch (error) {
-    console.error("Error creating message:", error);
+    console.error("❌ Error creating message:", error);
     return {
       success: false,
       error:
@@ -224,7 +206,6 @@ export async function createMessage(data: CreateMessageDTO) {
     };
   }
 }
-
 // ============================================
 // GET MESSAGES - FIXED with populated read_by
 // ============================================
