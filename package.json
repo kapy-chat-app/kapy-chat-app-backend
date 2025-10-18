@@ -14,6 +14,7 @@
   "dependencies": {
     "@clerk/nextjs": "^6.32.0",
     "@huggingface/inference": "^4.11.0",
+    "agora-access-token": "^2.0.4",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
