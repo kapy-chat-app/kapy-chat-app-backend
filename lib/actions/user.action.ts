@@ -11,6 +11,25 @@ import User from "@/database/user.model";
 import { uploadFileToCloudinary } from "./file.action";
 import { clerkClient } from "@clerk/nextjs/server";
 
+/**
+ * Set user role in Clerk publicMetadata
+ */
+export async function setUserRole(userId: string, role: string) {
+  try {
+    const clerk = await clerkClient();
+    await clerk.users.updateUser(userId, {
+      publicMetadata: { role }, // ⭐ Changed to publicMetadata
+    });
+    console.log(`✅ Role "${role}" assigned to user: ${userId}`);
+  } catch (error) {
+    console.error('Failed to update user role:', error);
+    throw new Error('Could not update user role');
+  }
+}
+
+/**
+ * Create new user with default role "user"
+ */
 export async function createUser(userData: UserCreateReq) {
   try {
     await connectToDatabase();
@@ -70,6 +89,15 @@ export async function createUser(userData: UserCreateReq) {
       },
     });
 
+    // ⭐ Set default role "user" in Clerk publicMetadata
+    try {
+      await setUserRole(userData.clerkId, "user");
+      console.log(`✅ Default role "user" assigned to new user: ${userData.clerkId}`);
+    } catch (roleError) {
+      console.error("⚠️ Failed to set role, but user was created:", roleError);
+      // Don't fail the entire user creation if role assignment fails
+    }
+
     return {
       success: true,
       error: null,
@@ -79,6 +107,7 @@ export async function createUser(userData: UserCreateReq) {
         username: newUser.username,
         email: newUser.email,
         full_name: newUser.full_name,
+        role: "user", // Include role in response
       },
     };
   } catch (error) {

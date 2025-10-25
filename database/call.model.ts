@@ -6,7 +6,7 @@ export interface ICallParticipant {
   user: mongoose.Types.ObjectId; // Ref to User
   joined_at?: Date;
   left_at?: Date;
-  status: "ringing" | "joined" | "declined" | "missed" | "left";
+  status: "ringing" | "joined" | "declined" | "missed" | "left"|"rejected";
   is_muted?: boolean;
   is_video_enabled?: boolean;
 }
@@ -17,10 +17,21 @@ export interface ICall extends Document {
   participants: ICallParticipant[];
   type: "audio" | "video";
   is_group_call: boolean; // true = nhóm, false = cá nhân
-  status: "ringing" | "ongoing" | "ended" | "declined" | "missed" | "cancelled";
+  status: "ringing" | "ongoing" | "ended" | "declined" | "missed" | "cancelled"|"rejected";
   started_at: Date;
   ended_at?: Date;
   duration?: number;
+
+ recording_audio_url?: string; // Cloudinary URL for audio
+  recording_video_url?: string; // Cloudinary URL for video frame
+  recording_duration?: number; // Duration in seconds
+  recording_uploaded_at?: Date;
+  emotion_analysis?: {
+    emotion: string; // happy, sad, angry, neutral, etc.
+    confidence: number; // 0-1
+    analyzed_at: Date;
+  };
+  
   created_at: Date;
   updated_at: Date;
 }
@@ -50,12 +61,21 @@ const CallSchema = new Schema<ICall>({
   is_group_call: { type: Boolean, default: false },
   status: {
     type: String,
-    enum: ["ringing", "ongoing", "ended", "declined", "missed", "cancelled"],
+    enum: ["ringing", "ongoing", "ended", "declined", "missed", "cancelled","rejected"],
     default: "ringing",
   },
   started_at: { type: Date, default: Date.now },
   ended_at: { type: Date },
   duration: { type: Number },
+   recording_audio_url: { type: String },
+  recording_video_url: { type: String },
+  recording_duration: { type: Number },
+  recording_uploaded_at: { type: Date },
+  emotion_analysis: {
+    emotion: { type: String },
+    confidence: { type: Number },
+    analyzed_at: { type: Date },
+  },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
 });
@@ -75,7 +95,8 @@ CallSchema.index({
   "participants.user": 1,
   status: 1,
 }); // Tìm cuộc gọi đang hoạt động của user
-
+CallSchema.index({ recording_audio_url: 1 }); // Tìm calls có recording
+CallSchema.index({ "emotion_analysis.emotion": 1 }); // Tìm theo emotion
 // Pre-save middleware - Validation và business logic
 CallSchema.pre("save", function (next) {
   this.updated_at = new Date();
@@ -368,6 +389,33 @@ CallSchema.statics.getCallStatistics = function (
       },
     },
   ]);
+};
+
+
+CallSchema.statics.getCallsWithEmotion = function (
+  userId: string,
+  emotion?: string,
+  options: any = {}
+) {
+  const { page = 1, limit = 20 } = options;
+  const skip = (page - 1) * limit;
+
+  const query: any = {
+    $or: [{ caller: userId }, { "participants.user": userId }],
+    recording_audio_url: { $exists: true },
+  };
+
+  if (emotion) {
+    query["emotion_analysis.emotion"] = emotion;
+  }
+
+  return this.find(query)
+    .populate("caller", "username full_name avatar")
+    .populate("participants.user", "username full_name avatar")
+    .populate("conversation", "name type participants")
+    .sort({ started_at: -1 })
+    .skip(skip)
+    .limit(limit);
 };
 
 const Call = models.Call || model("Call", CallSchema);
