@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// lib/services/huggingface.service.ts - AI-POWERED WITH VIETNAMESE TRANSLATION
+// lib/services/huggingface.service.ts - AI-POWERED WITH VIETNAMESE TRANSLATION + CALL EMOTION ANALYSIS
 import { InferenceClient } from '@huggingface/inference';
 
 const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
@@ -18,6 +18,12 @@ export interface EmotionResult {
   method: 'ai' | 'fallback';
   language?: 'en' | 'vi' | 'mixed';
   translatedText?: string;
+  audioFeatures?: {
+    tone: string;
+    pitch: number;
+    speed: number;
+    volume: number;
+  };
 }
 
 export interface ChatMessage {
@@ -197,28 +203,13 @@ export class HuggingFaceService {
             emotionMap.fear = Math.max(emotionMap.fear, score);
           } else if (label.includes('surprise') || label === 'surprised') {
             emotionMap.surprise = Math.max(emotionMap.surprise, score);
-          } else if (label.includes('neutral')) {
+          } else if (label.includes('neutral') || label === 'calm') {
             emotionMap.neutral = Math.max(emotionMap.neutral, score);
-          } else if (emotionMap.hasOwnProperty(label)) {
-            emotionMap[label] = score;
           }
 
           if (score > maxScore) {
             maxScore = score;
-            // Map the dominant emotion properly
-            if (label.includes('joy') || label === 'happiness' || label === 'happy') {
-              dominantEmotion = 'joy';
-            } else if (label.includes('sad') || label === 'sadness') {
-              dominantEmotion = 'sadness';
-            } else if (label.includes('anger') || label === 'angry') {
-              dominantEmotion = 'anger';
-            } else if (label.includes('fear') || label === 'scared') {
-              dominantEmotion = 'fear';
-            } else if (label.includes('surprise')) {
-              dominantEmotion = 'surprise';
-            } else if (emotionMap.hasOwnProperty(label)) {
-              dominantEmotion = label;
-            }
+            dominantEmotion = label;
           }
         });
       } else if (modelName.includes('sentiment')) {
@@ -226,378 +217,186 @@ export class HuggingFaceService {
           const label = item.label.toLowerCase();
           const score = item.score;
 
-          if (label.includes('positive') || label === '5 stars' || label === '4 stars') {
-            emotionMap.joy = score;
-            if (score > maxScore) {
-              maxScore = score;
-              dominantEmotion = 'joy';
-            }
-          } else if (label.includes('negative') || label === '1 star' || label === '2 stars') {
-            emotionMap.sadness = score * 0.6;
-            emotionMap.anger = score * 0.4;
-            if (score > maxScore) {
-              maxScore = score;
-              dominantEmotion = 'sadness';
-            }
+          if (label.includes('positive') || label.includes('pos') || label === '4 stars' || label === '5 stars') {
+            emotionMap.joy = Math.max(emotionMap.joy, score);
+          } else if (label.includes('negative') || label.includes('neg') || label === '1 star' || label === '2 stars') {
+            emotionMap.sadness = Math.max(emotionMap.sadness, score * 0.6);
+            emotionMap.anger = Math.max(emotionMap.anger, score * 0.4);
           } else if (label.includes('neutral') || label === '3 stars') {
-            emotionMap.neutral = score;
-            if (score > maxScore) {
-              maxScore = score;
-              dominantEmotion = 'neutral';
-            }
+            emotionMap.neutral = Math.max(emotionMap.neutral, score);
+          }
+
+          if (score > maxScore) {
+            maxScore = score;
           }
         });
       }
 
-      const total = Object.values(emotionMap).reduce((sum, score) => sum + score, 0);
-      if (total > 0) {
-        Object.keys(emotionMap).forEach(emotion => {
-          emotionMap[emotion] = emotionMap[emotion] / total;
-        });
+      // Normalize scores to sum to 1
+      const totalScore = Object.values(emotionMap).reduce((sum, val) => sum + val, 0);
+      if (totalScore > 0) {
+        for (const emotion in emotionMap) {
+          emotionMap[emotion] /= totalScore;
+        }
       }
 
+      // Get dominant emotion with highest score
+      const sortedEmotions = Object.entries(emotionMap).sort((a, b) => b[1] - a[1]);
+      const [topEmotion, topScore] = sortedEmotions[0];
+
       return {
-        emotion: dominantEmotion,
-        score: maxScore,
+        emotion: topEmotion,
+        score: topScore,
         allScores: emotionMap as any,
-        method: 'ai'
+        method: 'ai',
       };
     } catch (error) {
-      console.error('Error parsing AI result:', error);
+      console.error('Error parsing AI emotion result:', error);
       return null;
     }
   }
 
-  // ============================================
-  // 🇻🇳 ENHANCED FALLBACK WITH VIETNAMESE CONTEXT
-  // ============================================
   private static analyzeEmotionIntelligentFallback(text: string): EmotionResult {
     const lowerText = text.toLowerCase();
     
-    // Enhanced emotion keywords with teen code and common variations
+    // Vietnamese emotion keywords
     const emotionKeywords = {
-      joy: [
-        // English
-        'happy', 'great', 'wonderful', 'love', 'excited', 'joy', 'amazing', 'excellent',
-        'fantastic', 'awesome', 'blessed', 'grateful', 'delighted', 'cheerful', 'pleased',
-        'thrilled', 'perfect', 'yay', 'woohoo', 'nice', 'good', 'best', 'beautiful',
-        
-        // Vietnamese - standard
-        'vui', 'vui vẻ', 'vui sướng', 'hạnh phúc', 'tuyệt vời', 'tốt', 'hay', 'thích',
-        'yêu', 'mến', 'thích thú', 'phấn khích', 'hào hứng', 'sung sướng', 'khoái',
-        'tuyệt', 'xuất sắc', 'tốt lắm', 'ngon', 'ổn áp', 'đỉnh', 'xịn', 'chất',
-        
-        // Vietnamese teen code & slang
-        'hehe', 'hihi', 'happy', 'yeah', 'oke', 'okie', 'okela', 'cưng', 'iu',
-        'yolo', 'nice', 'ok nha', 'dc', 'được', 'tuyezt', 'tuyet', 'dinhf', 'pro',
-        'kute', 'cute', 'dễ thương', 'dzui', 'vvui', 'vuii', 'haha', 'hahaha',
-        'hehe', 'xinh', 'dep', 'đẹp', 'ghê', 'giỏi', 'tuyệt zời', 'perfect',
-        
-        // Emojis
-        '😊', '😄', '😃', '😁', '🥰', '😍', '❤️', '💕', '🎉', '🎊', '✨', '🌟', '👏', '🙌', '💖'
-      ],
-      
-      sadness: [
-        // English
-        'sad', 'depressed', 'unhappy', 'lonely', 'miss', 'cry', 'hurt', 'broken',
-        'disappointed', 'down', 'upset', 'blue', 'sorrow', 'grief',
-        
-        // Vietnamese - standard
-        'buồn', 'buồn bã', 'buồn rầu', 'tủi thân', 'cô đơn', 'cô độc', 'nhớ', 'khóc',
-        'đau', 'đau khổ', 'đau buồn', 'đau lòng', 'thất vọng', 'chán', 'chán nản',
-        'thương', 'tiếc', 'mất', 'xa', 'chia tay', 'tan vỡ', 'thất tình',
-        
-        // Vietnamese teen code & slang
-        'buồn vl', 'buồn vcl', 'buồn quá', 'buồn wa', 'huhuu', 'huhu', 'wuwu',
-        'qq', 'qá buồn', 'bùn', 'buồn ơi', 'sad', 'tủi', 'đáng thương', 'éo',
-        'tệ', 'tồi', 'buồn thế', 'muốn khóc', 'huhuhu', 'miss', 'nhớ quá',
-        'ôi đau', 'chán đời', 'chán vcl', 'wtf', 'dm', 'vailon',
-        
-        // Emojis
-        '😢', '😭', '😔', '😞', '😟', '🥺', '💔', '😿', '😥', '😪'
-      ],
-      
-      anger: [
-        // English  
-        'angry', 'mad', 'furious', 'hate', 'annoyed', 'frustrated', 'pissed',
-        'irritated', 'rage', 'damn',
-        
-        // Vietnamese - standard
-        'giận', 'tức', 'tức giận', 'tức tối', 'bực', 'bực mình', 'ghét', 'căm',
-        'cáu', 'phẫn nộ', 'điên', 'khó chịu', 'chán ghét', 'không ưa',
-        
-        // Vietnamese teen code & slang
-        'vcl', 'vl', 'wtf', 'dm', 'đm', 'cmn', 'cc', 'vãi', 'vải', 'bực vl',
-        'ghét vl', 'giận quá', 'cáu vcl', 'điên', 'ngu', 'đần', 'nực cười',
-        'fake', 'ảo', 'khùng', 'tức ghê', 'bực mình quá', 'khó chịu vl',
-        
-        // Emojis
-        '😠', '😡', '🤬', '😤', '💢', '👿', '😾', '🖕'
-      ],
-      
-      fear: [
-        // English
-        'scared', 'afraid', 'worry', 'anxious', 'nervous', 'panic', 'terrified',
-        'stress', 'fear',
-        
-        // Vietnamese - standard
-        'sợ', 'sợ hãi', 'lo', 'lo lắng', 'lo âu', 'căng thẳng', 'hoảng', 'kinh',
-        'khiếp', 'run', 'bồn chồn', 'bất an', 'hồi hộp', 'stress',
-        
-        // Vietnamese teen code & slang
-        'sợ vl', 'sợ wa', 'sợ quá', 'lo wa', 'stress', 'căng', 'lo sợ',
-        'hoảng vcl', 'sợ chết', 'omg', 'trời ơi', 'ối', 'ui', 'sợ quá trời',
-        
-        // Emojis
-        '😨', '😰', '😱', '😧', '😦', '😬', '🥶', '😓'
-      ],
-      
-      surprise: [
-        // English
-        'surprised', 'shocked', 'amazed', 'wow', 'omg', 'unexpected', 'wtf',
-        
-        // Vietnamese - standard
-        'ngạc nhiên', 'bất ngờ', 'sốc', 'choáng', 'kinh ngạc', 'không ngờ',
-        'không tin', 'lạ', 'kỳ lạ',
-        
-        // Vietnamese teen code & slang
-        'wow', 'omg', 'wtf', 'woa', 'ơ', 'ủa', 'hả', 'sao', 'gì', 'hả',
-        'trời ơi', 'ối', 'ui', 'ôi', 'sốc vcl', 'choáng vl', 'không tin nổi',
-        'sao vậy', 'thật không', 'thật á', 'nghiêm túc', 'serious',
-        
-        // Emojis
-        '😮', '😯', '😲', '🤯', '😳', '🙀', '‼️', '⁉️', '😱'
-      ],
-      
-      neutral: [
-        'ok', 'okay', 'fine', 'normal', 'alright', 'được', 'ổn', 'tạm', 'bình thường',
-        'ừ', 'uhm', 'à', 'vâng', 'dạ', 'thôi', 'vậy', 'ok nha', 'oke', 'okie'
-      ]
+      joy: {
+        en: ['happy', 'joy', 'great', 'love', 'wonderful', 'amazing', 'excellent', 'good', 'glad', 'delighted', 'excited', 'blessed', 'grateful', 'thankful'],
+        vi: ['vui', 'hạnh phúc', 'tuyệt vời', 'yêu', 'thích', 'tốt', 'hay', 'giỏi', 'mừng', 'sung sướng', 'phấn khởi'],
+        emoji: ['😊', '😄', '😃', '😁', '❤️', '🥰', '😍', '🎉', '✨']
+      },
+      sadness: {
+        en: ['sad', 'unhappy', 'sorry', 'disappointed', 'miss', 'lonely', 'depressed', 'hurt', 'pain', 'cry', 'heartbroken'],
+        vi: ['buồn', 'không vui', 'thất vọng', 'nhớ', 'cô đơn', 'u sầu', 'đau', 'khóc', 'lòng nặng'],
+        emoji: ['😢', '😭', '😔', '☹️', '🥺', '💔']
+      },
+      anger: {
+        en: ['angry', 'mad', 'hate', 'furious', 'annoyed', 'frustrated', 'irritated', 'pissed', 'upset'],
+        vi: ['tức', 'giận', 'ghét', 'bực', 'khó chịu', 'phật lòng', 'điên tiết', 'tức giận'],
+        emoji: ['😠', '😡', '🤬', '😤']
+      },
+      fear: {
+        en: ['afraid', 'scared', 'worried', 'anxious', 'nervous', 'terrified', 'panic', 'stress', 'concerned'],
+        vi: ['sợ', 'lo', 'lo lắng', 'hãi', 'căng thẳng', 'hoảng', 'bồn chồn', 'lo âu'],
+        emoji: ['😨', '😰', '😱', '😟', '😧']
+      },
+      surprise: {
+        en: ['wow', 'omg', 'shocked', 'surprised', 'unexpected', 'unbelievable', 'astonished'],
+        vi: ['ôi', 'trời', 'bất ngờ', 'ngạc nhiên', 'kinh ngạc', 'không ngờ'],
+        emoji: ['😮', '😲', '😯', '🤯']
+      }
     };
 
-    const scores: Record<string, number> = {
-      joy: 0, sadness: 0, anger: 0, fear: 0, surprise: 0, neutral: 0.15,
+    const emotionScores = {
+      joy: 0,
+      sadness: 0,
+      anger: 0,
+      fear: 0,
+      surprise: 0,
+      neutral: 0.3,
     };
 
-    // Enhanced scoring with context awareness
-    Object.entries(emotionKeywords).forEach(([emotion, keywords]) => {
-      keywords.forEach(keyword => {
-        if (lowerText.includes(keyword)) {
-          // Count occurrences
-          const regex = new RegExp(this.escapeRegex(keyword), 'gi');
-          const matches = lowerText.match(regex) || [];
-          const matchCount = matches.length;
-          
-          if (matchCount > 0) {
-            // Base score
-            let baseScore = 0.3;
-            
-            // Longer keywords = more specific = higher weight
-            const lengthWeight = Math.min(keyword.length / 6, 2.5);
-            
-            // Multiple occurrences = stronger emotion
-            const frequencyBonus = Math.min(matchCount * 0.5, 1.8);
-            
-            // Emoji bonus
-            const isEmoji = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u.test(keyword);
-            const emojiBonus = isEmoji ? 1.5 : 1.0;
-            
-            scores[emotion] += (baseScore * lengthWeight * frequencyBonus * emojiBonus);
-          }
+    // Check for emotion keywords
+    for (const [emotion, keywords] of Object.entries(emotionKeywords)) {
+      const allKeywords = [...keywords.en, ...keywords.vi, ...keywords.emoji];
+      allKeywords.forEach((keyword) => {
+        if (lowerText.includes(keyword.toLowerCase())) {
+          emotionScores[emotion as keyof typeof emotionScores] += 0.2;
         }
       });
-    });
-
-    // Context modifiers (exclamation marks, repetition, caps)
-    const hasExclamation = (text.match(/!/g) || []).length;
-    const hasQuestionMarks = (text.match(/\?/g) || []).length;
-    const hasCapitalization = /[A-Z]{2,}/.test(text);
-    const hasRepetition = /(.)\1{2,}/.test(text); // like "huhuhu", "hahaha"
-    
-    if (hasExclamation > 2) {
-      scores.joy *= 1.3;
-      scores.anger *= 1.2;
-      scores.surprise *= 1.2;
-    }
-    
-    if (hasCapitalization) {
-      scores.anger *= 1.3;
-      scores.surprise *= 1.2;
-    }
-    
-    if (hasRepetition) {
-      scores.joy *= 1.2;
-      scores.sadness *= 1.3;
     }
 
     // Normalize scores
-    const total = Object.values(scores).reduce((sum, score) => sum + score, 0);
-    if (total > 0) {
-      Object.keys(scores).forEach(emotion => {
-        scores[emotion] = scores[emotion] / total;
-      });
-    } else {
-      scores.neutral = 1.0;
-    }
-
-    const dominantEntry = Object.entries(scores).reduce((max, [emotion, score]) => 
-      score > max[1] ? [emotion, score] : max
-    );
-
-    return {
-      emotion: dominantEntry[0],
-      score: dominantEntry[1],
-      allScores: scores as any,
-      method: 'fallback'
-    };
-  }
-
-  private static escapeRegex(str: string): string {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  // ============================================
-  // 🆕 AI-POWERED RECOMMENDATIONS
-  // ============================================
-  static async generateEmotionRecommendations(
-    userId: string,
-    emotionData: any
-  ): Promise<string[]> {
-    const emotion = emotionData.dominant_emotion || 'neutral';
-    const confidence = emotionData.confidence_score || 0.5;
-    const messageContent = emotionData.text_analyzed || '';
-    
-    console.log(`💡 Generating AI recommendations for emotion: ${emotion} (${(confidence * 100).toFixed(0)}%)`);
-
-    const models = [
-      'meta-llama/Llama-3.2-3B-Instruct',
-      'mistralai/Mistral-7B-Instruct-v0.3',
-      'HuggingFaceH4/zephyr-7b-beta',
-    ];
-
-    for (const model of models) {
-      try {
-        console.log(`🤖 Trying model: ${model}`);
-        
-        const prompt = this.buildRecommendationPrompt(emotion, confidence, messageContent);
-        
-        const response = await hf.chatCompletion({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: 'You are an empathetic emotional wellness coach. Provide personalized, actionable recommendations based on the user\'s emotional state. Always be supportive and practical.'
-            },
-            { role: 'user', content: prompt }
-          ],
-          max_tokens: 500,
-          temperature: 0.85,
-        });
-
-        const content = response.choices[0]?.message?.content;
-        
-        if (content?.trim()) {
-          const recommendations = this.parseRecommendations(content);
-          
-          if (recommendations.length >= 4) {
-            console.log(`✅ AI generated ${recommendations.length} recommendations with ${model}`);
-            return recommendations.slice(0, 6);
-          }
-        }
-      } catch (error: any) {
-        console.log(`⚠️ ${model} failed: ${error.message}`);
-        continue;
+    const totalScore = Object.values(emotionScores).reduce((a, b) => a + b, 0);
+    if (totalScore > 0) {
+      for (const key in emotionScores) {
+        emotionScores[key as keyof typeof emotionScores] /= totalScore;
       }
     }
 
-    console.log('🔄 All AI models failed, using enhanced fallback');
-    return this.getEnhancedFallbackRecommendations(emotion, confidence, messageContent);
+    const dominantEmotion = Object.entries(emotionScores).reduce((max, [emotion, score]) =>
+      score > max.score ? { emotion, score } : max,
+      { emotion: 'neutral', score: 0.3 }
+    );
+
+    return {
+      emotion: dominantEmotion.emotion,
+      score: dominantEmotion.score,
+      allScores: emotionScores,
+      method: 'fallback',
+    };
   }
 
-  private static buildRecommendationPrompt(
-    emotion: string, 
+  // ============================================
+  // 🎯 EMOTION-BASED RECOMMENDATIONS
+  // ============================================
+  static async generateEmotionRecommendations(
+    emotion: string,
     confidence: number,
     messageContent: string
-  ): string {
-    const contextSnippet = messageContent.substring(0, 100);
-    const intensityLevel = confidence > 0.7 ? 'strongly' : confidence > 0.5 ? 'moderately' : 'slightly';
-    
-    const prompts: Record<string, string> = {
-      joy: `A person is feeling ${intensityLevel} joyful. Their message: "${contextSnippet}..."
-      
-Provide 5 practical recommendations to:
-1. Help them celebrate and appreciate this positive moment
-2. Share their happiness with others meaningfully
-3. Channel this energy into productive activities
-4. Create lasting memories of this positive experience
-5. Use this positive state to tackle challenges
+  ): Promise<string[]> {
+    try {
+      console.log(`🎯 Generating recommendations for emotion: ${emotion} (${confidence})`);
 
-Format as a numbered list. Be specific and actionable.`,
+      const prompt = `Based on the emotion "${emotion}" with confidence ${(confidence * 100).toFixed(0)}%, provide 3-6 short, practical, and empathetic recommendations or supportive suggestions. Each recommendation should be 1-2 sentences. Focus on actionable advice and emotional support.
 
-      sadness: `A person is feeling ${intensityLevel} sad. Their message: "${contextSnippet}..."
-      
-Provide 5 empathetic and practical recommendations to:
-1. Acknowledge and process their feelings healthily
-2. Connect with supportive people or resources
-3. Engage in gentle self-care activities
-4. Find small ways to boost their mood
-5. Remember that this feeling is temporary
+Message context: "${messageContent.substring(0, 100)}"
 
-Format as a numbered list. Be compassionate and actionable.`,
+Provide recommendations in this format:
+1. [First recommendation]
+2. [Second recommendation]
+3. [Third recommendation]`;
 
-      anger: `A person is feeling ${intensityLevel} angry. Their message: "${contextSnippet}..."
-      
-Provide 5 calming and constructive recommendations to:
-1. Release tension in healthy ways (physical activity, breathing)
-2. Process the root cause of their anger
-3. Communicate their feelings effectively
-4. Avoid actions they might regret
-5. Channel this energy into positive change
+      const models = [
+        'meta-llama/Llama-3.2-3B-Instruct',
+        'mistralai/Mistral-7B-Instruct-v0.3',
+        'HuggingFaceH4/zephyr-7b-beta',
+      ];
 
-Format as a numbered list. Be understanding and practical.`,
+      for (const model of models) {
+        try {
+          const response = await hf.chatCompletion({
+            model,
+            messages: [
+              {
+                role: 'system',
+                content: 'You are an empathetic AI assistant providing emotional support and practical recommendations.'
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ],
+            max_tokens: 300,
+            temperature: 0.7,
+          });
 
-      fear: `A person is feeling ${intensityLevel} fearful or anxious. Their message: "${contextSnippet}..."
-      
-Provide 5 grounding and reassuring recommendations to:
-1. Use immediate calming techniques (breathing, grounding)
-2. Break down their concerns into manageable parts
-3. Seek support from trusted people
-4. Challenge anxious thoughts with evidence
-5. Take small, safe steps forward
+          const content = response.choices[0]?.message?.content;
+          
+          if (content && content.trim()) {
+            console.log(`✅ AI recommendations generated with ${model}`);
+            return this.parseRecommendations(content);
+          }
+        } catch (modelError: any) {
+          console.log(`⚠️ ${model} failed: ${modelError.message}`);
+          continue;
+        }
+      }
 
-Format as a numbered list. Be calming and supportive.`,
-
-      surprise: `A person is feeling ${intensityLevel} surprised. Their message: "${contextSnippet}..."
-      
-Provide 5 helpful recommendations to:
-1. Process this unexpected information or event
-2. Take time to understand what happened
-3. Share their experience if helpful
-4. Adjust their plans if needed
-5. Learn from this unexpected situation
-
-Format as a numbered list. Be balanced and thoughtful.`,
-
-      neutral: `A person is feeling ${intensityLevel} neutral or calm. Their message: "${contextSnippet}..."
-      
-Provide 5 proactive recommendations to:
-1. Use this balanced state to plan ahead
-2. Practice mindfulness and presence
-3. Set meaningful goals or intentions
-4. Connect with others meaningfully
-5. Engage in activities that bring fulfillment
-
-Format as a numbered list. Be encouraging and practical.`
-    };
-
-    return prompts[emotion] || prompts.neutral;
+      console.log('🔄 AI recommendations failed, using fallback');
+      return this.getEnhancedFallbackRecommendations(emotion, confidence, messageContent);
+    } catch (error) {
+      console.error('Error generating recommendations:', error);
+      return this.getEnhancedFallbackRecommendations(emotion, confidence, messageContent);
+    }
   }
 
-  private static parseRecommendations(content: string): string[] {
-    const lines = content.split('\n').filter(line => line.trim().length > 0);
+  private static parseRecommendations(aiResponse: string): string[] {
+    const lines = aiResponse.split('\n').filter(line => line.trim());
     const recommendations: string[] = [];
 
-    for (const line of lines) {
+    for (let line of lines) {
       let cleaned = line
         .replace(/^\d+[\.)]\s*/, '')
         .replace(/^[-*•]\s*/, '')
@@ -684,10 +483,13 @@ Format as a numbered list. Be encouraging and practical.`
   }
 
   // ============================================
-  // AUDIO EMOTION ANALYSIS
+  // 🎤 AUDIO EMOTION ANALYSIS (CALL SUPPORT)
   // ============================================
   static async analyzeAudioEmotion(audioBuffer: Buffer): Promise<EmotionResult> {
     try {
+      console.log('🎤 Analyzing audio emotion via speech-to-text + emotion...');
+
+      // First, transcribe audio using Whisper
       const transcription = await hf.automaticSpeechRecognition({
         model: 'openai/whisper-base',
         data: audioBuffer,
@@ -695,22 +497,150 @@ Format as a numbered list. Be encouraging and practical.`
 
       const text = transcription.text;
       console.log(`🎤 Transcribed audio: "${text}"`);
-      return await this.analyzeEmotion(text);
+      
+      // Then analyze emotion from transcribed text
+      const emotionResult = await this.analyzeEmotion(text);
+      
+      // Add audio features placeholder
+      return {
+        ...emotionResult,
+        audioFeatures: {
+          tone: emotionResult.emotion,
+          pitch: 0.5, // Would need actual pitch detection library
+          speed: 1.0, // Would need actual speech rate detection
+          volume: 0.7, // Would need actual volume analysis
+        }
+      };
     } catch (error) {
-      console.error('Error analyzing audio emotion:', error);
+      console.error('❌ Audio emotion analysis failed:', error);
+      // Return neutral emotion as fallback
       return {
         emotion: 'neutral',
         score: 0.5,
         allScores: {
-          joy: 0.1, sadness: 0.1, anger: 0.1, fear: 0.1, surprise: 0.1, neutral: 0.5,
+          joy: 0.1, 
+          sadness: 0.1, 
+          anger: 0.1, 
+          fear: 0.1, 
+          surprise: 0.1, 
+          neutral: 0.5,
         },
-        method: 'fallback'
+        method: 'fallback',
+        audioFeatures: {
+          tone: 'neutral',
+          pitch: 0.5,
+          speed: 1.0,
+          volume: 0.5,
+        }
       };
     }
   }
 
   // ============================================
-  // CHAT RESPONSE
+  // 📹 VIDEO EMOTION ANALYSIS (FACIAL EXPRESSION)
+  // ============================================
+  static async analyzeVideoEmotion(imageBuffer: Buffer): Promise<EmotionResult> {
+    try {
+      console.log('📹 Analyzing video/face emotion via HuggingFace...');
+
+      const result = await hf.imageClassification({
+        model: 'trpakov/vit-face-expression',
+        data: imageBuffer,
+      });
+
+      // Map results to our emotion structure
+      const emotionScores = {
+        joy: 0,
+        sadness: 0,
+        anger: 0,
+        fear: 0,
+        surprise: 0,
+        neutral: 0,
+      };
+
+      // Process HuggingFace facial expression results
+      for (const item of result) {
+        const label = item.label.toLowerCase();
+        const score = item.score;
+
+        if (label.includes('happy') || label.includes('joy')) {
+          emotionScores.joy = Math.max(emotionScores.joy, score);
+        } else if (label.includes('sad')) {
+          emotionScores.sadness = Math.max(emotionScores.sadness, score);
+        } else if (label.includes('angry') || label.includes('anger')) {
+          emotionScores.anger = Math.max(emotionScores.anger, score);
+        } else if (label.includes('fear') || label.includes('afraid')) {
+          emotionScores.fear = Math.max(emotionScores.fear, score);
+        } else if (label.includes('surprise')) {
+          emotionScores.surprise = Math.max(emotionScores.surprise, score);
+        } else if (label.includes('neutral')) {
+          emotionScores.neutral = Math.max(emotionScores.neutral, score);
+        }
+      }
+
+      // Normalize scores
+      const totalScore = Object.values(emotionScores).reduce((a, b) => a + b, 0);
+      if (totalScore > 0) {
+        for (const key in emotionScores) {
+          emotionScores[key as keyof typeof emotionScores] /= totalScore;
+        }
+      }
+
+      // Find dominant emotion
+      const dominantEmotion = Object.entries(emotionScores).reduce((max, [emotion, score]) =>
+        score > max.score ? { emotion, score } : max,
+        { emotion: 'neutral', score: 0 }
+      );
+
+      return {
+        emotion: dominantEmotion.emotion,
+        score: dominantEmotion.score,
+        allScores: emotionScores,
+        method: 'ai',
+      };
+    } catch (error) {
+      console.error('❌ Video emotion analysis failed:', error);
+      throw error;
+    }
+  }
+
+  // ============================================
+  // 🎭 COMBINE AUDIO + VIDEO EMOTION ANALYSIS
+  // ============================================
+  static combineEmotionAnalysis(
+    audioResult: EmotionResult,
+    videoResult: EmotionResult
+  ): EmotionResult {
+    const audioWeight = 0.6; // Audio is more reliable for emotion
+    const videoWeight = 0.4;
+
+    // Combine scores with weighting
+    const combinedScores = {
+      joy: audioResult.allScores.joy * audioWeight + videoResult.allScores.joy * videoWeight,
+      sadness: audioResult.allScores.sadness * audioWeight + videoResult.allScores.sadness * videoWeight,
+      anger: audioResult.allScores.anger * audioWeight + videoResult.allScores.anger * videoWeight,
+      fear: audioResult.allScores.fear * audioWeight + videoResult.allScores.fear * videoWeight,
+      surprise: audioResult.allScores.surprise * audioWeight + videoResult.allScores.surprise * videoWeight,
+      neutral: audioResult.allScores.neutral * audioWeight + videoResult.allScores.neutral * videoWeight,
+    };
+
+    // Find dominant emotion
+    const dominantEmotion = Object.entries(combinedScores).reduce((max, [emotion, score]) =>
+      score > max.score ? { emotion, score } : max,
+      { emotion: 'neutral', score: 0 }
+    );
+
+    return {
+      emotion: dominantEmotion.emotion,
+      score: dominantEmotion.score,
+      allScores: combinedScores,
+      method: 'ai',
+      audioFeatures: audioResult.audioFeatures,
+    };
+  }
+
+  // ============================================
+  // 💬 CHAT RESPONSE
   // ============================================
   static async getChatResponse(
     messages: ChatMessage[],
@@ -773,7 +703,7 @@ Format as a numbered list. Be encouraging and practical.`
   }
 
   // ============================================
-  // SENTIMENT ANALYSIS
+  // 📊 SENTIMENT ANALYSIS
   // ============================================
   static async analyzeSentiment(text: string): Promise<{
     sentiment: 'positive' | 'negative' | 'neutral';
@@ -798,3 +728,5 @@ Format as a numbered list. Be encouraging and practical.`
     }
   }
 }
+
+export default HuggingFaceService;
