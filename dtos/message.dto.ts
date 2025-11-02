@@ -3,10 +3,19 @@ import { SearchUserResponseDto } from "./friend.dto";
 
 export interface CreateMessageDTO {
   conversationId: string;
-  content?: string;
-  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'voice_note' | 'location';
-  attachments?: string[]; // File IDs
-  replyTo?: string; // Message ID
+  content?: string; // Optional plaintext (chỉ cho AI emotion analysis)
+  encryptedContent?: string; // ✨ Required for text messages
+  encryptionMetadata?: {
+    type: 'prekey' | 'whisper';
+    preKeyId?: number;
+    registrationId?: number;
+    baseKey?: string;
+    identityKey?: string;
+    signedPreKeyId?: number;
+  };
+  type: 'text' | 'image' | 'video' | 'audio' | 'file';
+  attachments?: string[];
+  replyTo?: string;
 }
 
 export interface MessageResponseDTO {
@@ -30,12 +39,4 @@ export interface MessageResponseDTO {
   }[];
   createdAt: Date;
   updatedAt: Date;
-}
-
-export interface CreateMessageDTO {
-  conversationId: string;
-  content?: string;
-  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'voice_note' | 'location';
-  attachments?: string[];
-  replyTo?: string;
 }

@@ -5,7 +5,14 @@ import mongoose, { Document, model, models, Schema } from "mongoose";
 export interface IMessage extends Document {
   conversation: mongoose.Types.ObjectId; // Ref to Conversation
   sender: mongoose.Types.ObjectId; // Ref to User
-  content?: string;
+  content?: string; // Plaintext (optional - chỉ dùng cho AI analysis/search)
+  encrypted_content?: string; // ✨ Nội dung đã mã hóa (REQUIRED cho text messages với E2EE)
+  encryption_metadata?: {
+    type: "PreKeyWhisperMessage" | "WhisperMessage";
+    registration_id?: number;
+    pre_key_id?: number;
+    signed_pre_key_id?: number;
+  };
   type:
     | "text"
     | "image"
@@ -45,7 +52,17 @@ const MessageSchema = new Schema<IMessage>({
     required: true,
   },
   sender: { type: Schema.Types.ObjectId, ref: "User", required: true },
-  content: { type: String },
+  content: { type: String }, // ✨ Optional - không bắt buộc với E2EE
+  encrypted_content: { type: String }, // ✨ Encrypted content cho E2EE
+  encryption_metadata: {
+    type: {
+      type: String,
+      enum: ["PreKeyWhisperMessage", "WhisperMessage"],
+    },
+    registration_id: { type: Number },
+    pre_key_id: { type: Number },
+    signed_pre_key_id: { type: Number },
+  },
   type: {
     type: String,
     enum: [
@@ -104,22 +121,30 @@ MessageSchema.index({ type: 1 });
 MessageSchema.index({ conversation: 1, "deleted_by.user": 1, created_at: -1 });
 MessageSchema.index({ "deleted_by.delete_type": 1 });
 
-// Validation
+// ✨ FIXED VALIDATION - Support E2EE
 MessageSchema.pre("save", function (next) {
   this.updated_at = new Date();
 
-  // Validate message content based on type
-  if (this.type === "text" && !this.content && this.attachments.length === 0) {
-    return next(new Error("Text messages must have content or attachments"));
+  // ✨ Validate message content based on type - SUPPORT E2EE
+  if (this.type === "text") {
+    // Text messages: Phải có HOẶC encrypted_content HOẶC content HOẶC attachments
+    if (!this.encrypted_content && !this.content && this.attachments.length === 0) {
+      return next(
+        new Error("Text messages must have encrypted_content, content, or attachments")
+      );
+    }
   }
 
-  if (this.type !== "text" && this.attachments.length === 0 && !this.metadata) {
-    return next(
-      new Error("Non-text messages must have attachments or metadata")
-    );
+  if (this.type !== "text" && this.type !== "call_log") {
+    // Non-text messages: Phải có attachments hoặc metadata
+    if (this.attachments.length === 0 && !this.metadata) {
+      return next(
+        new Error("Non-text messages must have attachments or metadata")
+      );
+    }
   }
 
-  // Set edited timestamp
+  // Set edited timestamp - CHỈ khi content thay đổi (không check encrypted_content)
   if (this.isModified("content") && !this.isNew) {
     this.is_edited = true;
     this.edited_at = new Date();
