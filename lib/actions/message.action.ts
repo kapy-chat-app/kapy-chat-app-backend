@@ -13,7 +13,7 @@ import { emitSocketEvent } from "../socket.helper";
 import { analyzeMessageEmotionsAsync } from "./emotion.action";
 
 // ============================================
-// CREATE MESSAGE - WITH RECEIVER EMOTION ANALYSIS
+// CREATE MESSAGE - WITH E2EE + EMOTION ANALYSIS
 // ============================================
 export async function createMessage(data: CreateMessageDTO) {
   try {
@@ -21,7 +21,23 @@ export async function createMessage(data: CreateMessageDTO) {
     const { userId } = await auth();
     if (!userId) throw new Error("Unauthorized");
 
-    const { conversationId, content, type, attachments, replyTo } = data;
+    const { 
+      conversationId, 
+      content, // Plaintext gốc (OPTIONAL - chỉ để AI analysis)
+      encryptedContent, // ✨ Encrypted content từ client (camelCase)
+      encryptionMetadata, // ✨ Encryption metadata từ client (camelCase)
+      type, 
+      attachments, 
+      replyTo 
+    } = data;
+
+    console.log('🔍 createMessage received:', {
+      hasContent: !!content,
+      hasEncryptedContent: !!encryptedContent,
+      hasEncryptionMetadata: !!encryptionMetadata,
+      type,
+      conversationId
+    });
 
     const user = await User.findOne({ clerkId: userId });
     if (!user) throw new Error("User not found");
@@ -37,33 +53,47 @@ export async function createMessage(data: CreateMessageDTO) {
     );
     if (!isParticipant) throw new Error("Not a participant");
 
-    // Validate message content
+    // ✨ E2EE Validation: Encrypted content is REQUIRED for text messages
     if (type === "text") {
-      if (!content || content.trim().length === 0) {
-        throw new Error("Text messages must have content");
+      if (!encryptedContent || encryptedContent.trim().length === 0) {
+        console.error('❌ Text message validation failed:', {
+          hasEncryptedContent: !!encryptedContent,
+          encryptedContentLength: encryptedContent?.length,
+          type
+        });
+        throw new Error("Text messages must have encrypted content for E2EE");
       }
-    } else {
+      console.log('✅ Text message has valid encrypted content');
+    }
+
+    // Validate non-text messages
+    if (type !== "text") {
       if (
         (!attachments || attachments.length === 0) &&
-        (!content || content.trim().length === 0)
+        (!encryptedContent || encryptedContent.trim().length === 0)
       ) {
-        throw new Error("Non-text messages must have attachments or content");
+        throw new Error("Non-text messages must have attachments or encrypted content");
       }
     }
 
-    // Create message
+    // ✨ Create message with ENCRYPTED content
     const message = await Message.create({
       conversation: conversationId,
       sender: user._id,
-      content: content?.trim(),
+      content: content?.trim(), // Optional plaintext (CHỈ dùng cho AI analysis, KHÔNG gửi qua socket)
+      encrypted_content: encryptedContent, // ✨ Lưu encrypted content (snake_case cho DB)
+      encryption_metadata: encryptionMetadata, // ✨ Lưu metadata (snake_case cho DB)
       type,
       attachments:
         attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [],
       reply_to: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined,
     });
 
+    console.log(`🔐 Message created with E2EE: ${message._id}`);
+
     // ==========================================
     // 🤖 AI EMOTION ANALYSIS FOR TEXT MESSAGES
+    // (GIỮ NGUYÊN - Chỉ chạy nếu có plaintext)
     // ==========================================
     if (type === "text" && content && content.trim().length > 0) {
       try {
@@ -81,10 +111,10 @@ export async function createMessage(data: CreateMessageDTO) {
           user: user._id,
           message: message._id,
           conversation: conversationId,
-          context: "message", // 'message' | 'voice_note' | 'call' | 'general'
+          context: "message",
           dominant_emotion: emotionResult.emotion,
           confidence_score: emotionResult.score,
-          emotion_scores: emotionResult.allScores, // Must match schema field name
+          emotion_scores: emotionResult.allScores,
           text_analyzed: content.trim(),
           analyzed_at: new Date()
         });
@@ -110,6 +140,8 @@ export async function createMessage(data: CreateMessageDTO) {
         console.error("❌ Emotion analysis failed:", emotionError);
         // Continue with message creation
       }
+    } else if (type === "text") {
+      console.log(`⚠️ No plaintext provided - skipping emotion analysis for message: ${message._id}`);
     }
     // ==========================================
 
@@ -169,7 +201,7 @@ export async function createMessage(data: CreateMessageDTO) {
       }));
     }
 
-    // Emit new message event via socket
+    // ✨ Emit new message event via socket - GỬI ENCRYPTED CONTENT
     await emitSocketEvent(
       "newMessage",
       conversationId,
@@ -180,12 +212,17 @@ export async function createMessage(data: CreateMessageDTO) {
         sender_name: user.full_name,
         sender_username: user.username,
         sender_avatar: messageObj.sender.avatar,
-        message_content: content,
+        message_content: undefined, // ✨ KHÔNG GỬI PLAINTEXT qua socket
+        encrypted_content: encryptedContent, // ✨ GỬI ENCRYPTED CONTENT
+        encryption_metadata: encryptionMetadata, // ✨ GỬI METADATA
         message_type: type,
         message: {
           ...messageObj,
           _id: messageObj._id.toString(),
           conversation: conversationId,
+          content: undefined, // ✨ XÓA plaintext khỏi response
+          encrypted_content: encryptedContent, // ✨ THÊM encrypted content (camelCase cho response)
+          encryption_metadata: encryptionMetadata, // ✨ THÊM metadata (camelCase cho response)
           created_at: messageObj.created_at || new Date(),
           updated_at: messageObj.updated_at || new Date(),
         },
@@ -193,9 +230,18 @@ export async function createMessage(data: CreateMessageDTO) {
       true // Send to all participants including sender
     );
 
+    console.log('✅ Socket event emitted with encrypted content');
+
+    // ✨ XÓA plaintext trước khi trả về client
+    delete messageObj.content;
+
     return {
       success: true,
-      data: messageObj,
+      data: {
+        ...messageObj,
+        encrypted_content: encryptedContent, // ✨ Trả về encrypted content (camelCase)
+        encryption_metadata: encryptionMetadata, // ✨ Trả về metadata (camelCase)
+      },
     };
   } catch (error) {
     console.error("❌ Error creating message:", error);
@@ -206,8 +252,9 @@ export async function createMessage(data: CreateMessageDTO) {
     };
   }
 }
+
 // ============================================
-// GET MESSAGES - FIXED with populated read_by
+// GET MESSAGES - WITH E2EE SUPPORT
 // ============================================
 export async function getMessages(
   conversationId: string,
@@ -259,6 +306,27 @@ export async function getMessages(
       { $sort: { created_at: -1 } },
       { $skip: skip },
       { $limit: limit },
+      // ✨ PROJECT: Đảm bảo trả về encrypted_content và encryption_metadata
+      {
+        $project: {
+          conversation: 1,
+          sender: 1,
+          encrypted_content: 1, // ✨ TRẢ VỀ encrypted content
+          encryption_metadata: 1, // ✨ TRẢ VỀ metadata
+          type: 1,
+          attachments: 1,
+          reply_to: 1,
+          reactions: 1,
+          is_edited: 1,
+          edited_at: 1,
+          deleted_by: 1,
+          read_by: 1,
+          metadata: 1,
+          created_at: 1,
+          updated_at: 1,
+        },
+      },
+      // ✅ POPULATE sender (GIỮ NGUYÊN)
       {
         $lookup: {
           from: "users",
@@ -288,6 +356,7 @@ export async function getMessages(
         },
       },
       { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
+      // ✅ POPULATE attachments (GIỮ NGUYÊN)
       {
         $lookup: {
           from: "files",
@@ -296,6 +365,7 @@ export async function getMessages(
           as: "attachments",
         },
       },
+      // ✅ POPULATE reply_to (GIỮ NGUYÊN)
       {
         $lookup: {
           from: "messages",
@@ -303,6 +373,17 @@ export async function getMessages(
           foreignField: "_id",
           as: "reply_to",
           pipeline: [
+            // ✨ XÓA content, GIỮ encrypted_content trong reply_to
+            {
+              $project: {
+                encrypted_content: 1, // ✨ TRẢ VỀ encrypted
+                encryption_metadata: 1, // ✨ TRẢ VỀ metadata
+                sender: 1,
+                type: 1,
+                attachments: 1,
+                created_at: 1,
+              },
+            },
             {
               $lookup: {
                 from: "users",
@@ -347,7 +428,7 @@ export async function getMessages(
         },
       },
       { $unwind: { path: "$reply_to", preserveNullAndEmptyArrays: true } },
-      // ✅ POPULATE read_by users
+      // ✅ POPULATE read_by users (GIỮ NGUYÊN)
       {
         $lookup: {
           from: "users",
@@ -394,7 +475,7 @@ export async function getMessages(
           },
         },
       },
-      // Populate avatars for read_by users
+      // ✅ Populate avatars for read_by users (GIỮ NGUYÊN)
       {
         $lookup: {
           from: "files",
@@ -472,10 +553,12 @@ export async function getMessages(
       ],
     });
 
+    console.log(`🔐 Retrieved ${messages.length} encrypted messages for conversation: ${conversationId}`);
+
     return {
       success: true,
       data: {
-        messages: messages.reverse(),
+        messages: messages.reverse(), // Trả về encrypted messages
         pagination: {
           page,
           limit,
