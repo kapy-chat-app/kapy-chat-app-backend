@@ -12,8 +12,10 @@ import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitSocketEvent } from "../socket.helper";
 import { analyzeMessageEmotionsAsync } from "./emotion.action";
 
+// src/actions/message.actions.ts - UPDATED VERSION
+
 // ============================================
-// CREATE MESSAGE - WITH E2EE + EMOTION ANALYSIS
+// CREATE MESSAGE - WITH E2EE + EMOTION ANALYSIS + ENCRYPTED FILES
 // ============================================
 export async function createMessage(data: CreateMessageDTO) {
   try {
@@ -36,7 +38,8 @@ export async function createMessage(data: CreateMessageDTO) {
       hasEncryptedContent: !!encryptedContent,
       hasEncryptionMetadata: !!encryptionMetadata,
       type,
-      conversationId
+      conversationId,
+      attachmentsCount: attachments?.length || 0,
     });
 
     const user = await User.findOne({ clerkId: userId });
@@ -151,21 +154,30 @@ export async function createMessage(data: CreateMessageDTO) {
       last_activity: new Date(),
     });
 
-    // Populate message for response
+    // ✨ UPDATED: Populate message với E2EE file support
     const populatedMessage = await Message.findById(message._id)
       .populate({
         path: "sender",
         select: "clerkId full_name username avatar",
         populate: { path: "avatar", select: "url" },
       })
-      .populate("attachments", "file_name file_type file_size url")
+      .populate({
+        path: "attachments", // ✨ UPDATED: Include E2EE fields
+        select: "file_name file_type file_size url is_encrypted encryption_metadata",
+      })
       .populate({
         path: "reply_to",
-        populate: {
-          path: "sender",
-          select: "clerkId full_name username avatar",
-          populate: { path: "avatar", select: "url" },
-        },
+        populate: [
+          {
+            path: "sender",
+            select: "clerkId full_name username avatar",
+            populate: { path: "avatar", select: "url" },
+          },
+          {
+            path: "attachments", // ✨ UPDATED: Include E2EE fields for reply_to
+            select: "file_name file_type file_size url is_encrypted encryption_metadata",
+          },
+        ],
       })
       .populate({
         path: "read_by.user",
@@ -201,7 +213,38 @@ export async function createMessage(data: CreateMessageDTO) {
       }));
     }
 
-    // ✨ Emit new message event via socket - GỬI ENCRYPTED CONTENT
+    // ✨ UPDATED: Transform attachments với E2EE metadata
+    if (messageObj.attachments && messageObj.attachments.length > 0) {
+      messageObj.attachments = messageObj.attachments.map((att: any) => ({
+        _id: att._id.toString(),
+        file_name: att.file_name,
+        file_type: att.file_type,
+        file_size: att.file_size,
+        url: att.url,
+        is_encrypted: att.is_encrypted || false, // ✨ E2EE flag
+        encryption_metadata: att.encryption_metadata || null, // ✨ E2EE metadata
+      }));
+
+      console.log('✅ Transformed attachments with E2EE info:', {
+        count: messageObj.attachments.length,
+        encrypted: messageObj.attachments.filter((a: any) => a.is_encrypted).length,
+      });
+    }
+
+    // ✨ UPDATED: Transform reply_to attachments
+    if (messageObj.reply_to?.attachments && messageObj.reply_to.attachments.length > 0) {
+      messageObj.reply_to.attachments = messageObj.reply_to.attachments.map((att: any) => ({
+        _id: att._id.toString(),
+        file_name: att.file_name,
+        file_type: att.file_type,
+        file_size: att.file_size,
+        url: att.url,
+        is_encrypted: att.is_encrypted || false,
+        encryption_metadata: att.encryption_metadata || null,
+      }));
+    }
+
+    // ✨ Emit new message event via socket - GỬI ENCRYPTED CONTENT + ENCRYPTED FILES
     await emitSocketEvent(
       "newMessage",
       conversationId,
@@ -223,6 +266,7 @@ export async function createMessage(data: CreateMessageDTO) {
           content: undefined, // ✨ XÓA plaintext khỏi response
           encrypted_content: encryptedContent, // ✨ THÊM encrypted content (camelCase cho response)
           encryption_metadata: encryptionMetadata, // ✨ THÊM metadata (camelCase cho response)
+          attachments: messageObj.attachments, // ✨ Include E2EE file info
           created_at: messageObj.created_at || new Date(),
           updated_at: messageObj.updated_at || new Date(),
         },
@@ -230,7 +274,7 @@ export async function createMessage(data: CreateMessageDTO) {
       true // Send to all participants including sender
     );
 
-    console.log('✅ Socket event emitted with encrypted content');
+    console.log('✅ Socket event emitted with encrypted content and encrypted files');
 
     // ✨ XÓA plaintext trước khi trả về client
     delete messageObj.content;
@@ -241,6 +285,7 @@ export async function createMessage(data: CreateMessageDTO) {
         ...messageObj,
         encrypted_content: encryptedContent, // ✨ Trả về encrypted content (camelCase)
         encryption_metadata: encryptionMetadata, // ✨ Trả về metadata (camelCase)
+        attachments: messageObj.attachments, // ✨ Include transformed attachments with E2EE
       },
     };
   } catch (error) {
@@ -254,7 +299,7 @@ export async function createMessage(data: CreateMessageDTO) {
 }
 
 // ============================================
-// GET MESSAGES - WITH E2EE SUPPORT
+// GET MESSAGES - WITH E2EE SUPPORT + ENCRYPTED FILES
 // ============================================
 export async function getMessages(
   conversationId: string,
@@ -356,16 +401,30 @@ export async function getMessages(
         },
       },
       { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
-      // ✅ POPULATE attachments (GIỮ NGUYÊN)
+      // ✨ UPDATED: POPULATE attachments WITH E2EE fields
       {
         $lookup: {
           from: "files",
           localField: "attachments",
           foreignField: "_id",
           as: "attachments",
+          pipeline: [
+            {
+              $project: {
+                _id: 1,
+                file_name: 1,
+                file_type: 1,
+                file_size: 1,
+                url: 1,
+                is_encrypted: 1, // ✨ E2EE flag
+                encryption_metadata: 1, // ✨ E2EE metadata (iv, auth_tag, sizes)
+                created_at: 1,
+              },
+            },
+          ],
         },
       },
-      // ✅ POPULATE reply_to (GIỮ NGUYÊN)
+      // ✨ UPDATED: POPULATE reply_to WITH E2EE files
       {
         $lookup: {
           from: "messages",
@@ -373,7 +432,6 @@ export async function getMessages(
           foreignField: "_id",
           as: "reply_to",
           pipeline: [
-            // ✨ XÓA content, GIỮ encrypted_content trong reply_to
             {
               $project: {
                 encrypted_content: 1, // ✨ TRẢ VỀ encrypted
@@ -416,12 +474,26 @@ export async function getMessages(
               },
             },
             { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
+            // ✨ UPDATED: Populate attachments in reply_to with E2EE
             {
               $lookup: {
                 from: "files",
                 localField: "attachments",
                 foreignField: "_id",
                 as: "attachments",
+                pipeline: [
+                  {
+                    $project: {
+                      _id: 1,
+                      file_name: 1,
+                      file_type: 1,
+                      file_size: 1,
+                      url: 1,
+                      is_encrypted: 1, // ✨ E2EE flag
+                      encryption_metadata: 1, // ✨ E2EE metadata
+                    },
+                  },
+                ],
               },
             },
           ],
@@ -553,12 +625,20 @@ export async function getMessages(
       ],
     });
 
-    console.log(`🔐 Retrieved ${messages.length} encrypted messages for conversation: ${conversationId}`);
+    // ✨ Log E2EE stats
+    const encryptedFilesCount = messages.reduce((count, msg) => {
+      return count + (msg.attachments?.filter((a: any) => a.is_encrypted).length || 0);
+    }, 0);
+
+    console.log(`🔐 Retrieved ${messages.length} encrypted messages for conversation: ${conversationId}`, {
+      totalMessages: messages.length,
+      encryptedFiles: encryptedFilesCount,
+    });
 
     return {
       success: true,
       data: {
-        messages: messages.reverse(), // Trả về encrypted messages
+        messages: messages.reverse(), // Trả về encrypted messages with E2EE files
         pagination: {
           page,
           limit,

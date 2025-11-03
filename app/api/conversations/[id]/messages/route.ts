@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+// app/api/conversations/[id]/messages/route.ts - UPDATED WITH ENCRYPTED FILES
 import { CreateMessageDTO } from "@/dtos/message.dto";
-import { uploadMultipleFiles } from "@/lib/actions/file.action";
+import { uploadMultipleFiles, uploadEncryptedFileToCloudinary } from "@/lib/actions/file.action"; // ✅ ADD uploadEncryptedFileToCloudinary
 import {
   removeReaction,
   deleteMessage,
@@ -10,13 +11,11 @@ import {
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 
-// ✅ FIX: Đổi params thành Promise và await nó
 export async function GET(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> } // ✅ ĐÃ SỬA
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // ✅ Verify authentication trước
     const { userId } = await auth();
     if (!userId) {
       return NextResponse.json(
@@ -25,7 +24,6 @@ export async function GET(
       );
     }
 
-    // ✅ FIX: Await params trước khi dùng
     const { id: conversationId } = await params;
 
     const { searchParams } = new URL(req.url);
@@ -73,11 +71,85 @@ export async function POST(
 
     let messageData: CreateMessageDTO;
 
-    // Check if request is FormData (có files)
-    if (contentType.includes('multipart/form-data')) {
+    // ==========================================
+    // ✨ CASE 1: ENCRYPTED FILES (JSON)
+    // ==========================================
+    if (contentType.includes('application/json')) {
+      const body = await req.json();
+      
+      console.log('📨 JSON request received:', {
+        hasEncryptedContent: !!body.encryptedContent,
+        hasPlaintextContent: !!body.content,
+        hasEncryptedFiles: !!body.encryptedFiles,
+        type: body.type,
+        bodyKeys: Object.keys(body)
+      });
+
+      // ✅ NEW: Handle encrypted files from mobile
+      if (body.encryptedFiles && Array.isArray(body.encryptedFiles)) {
+        console.log(`🔐 Processing ${body.encryptedFiles.length} encrypted files...`);
+
+        const uploadedFileIds: string[] = [];
+
+        for (const encFile of body.encryptedFiles) {
+          try {
+            const {
+              encryptedBase64,
+              originalFileName,
+              originalFileType,
+              encryptionMetadata
+            } = encFile;
+
+            if (!encryptedBase64 || !encryptionMetadata) {
+              console.error('❌ Invalid encrypted file data');
+              continue;
+            }
+
+            // Upload encrypted file
+            const uploadResult = await uploadEncryptedFileToCloudinary(
+              encryptedBase64,
+              originalFileName,
+              originalFileType,
+              encryptionMetadata
+            );
+
+            if (uploadResult.success && uploadResult.file) {
+              uploadedFileIds.push(uploadResult.file.id);
+              console.log('✅ Encrypted file uploaded:', originalFileName);
+            } else {
+              console.error('❌ Failed to upload encrypted file:', originalFileName);
+            }
+          } catch (error) {
+            console.error('❌ Error uploading encrypted file:', error);
+          }
+        }
+
+        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files`);
+
+        // Add uploaded file IDs to message
+        messageData = {
+          ...body,
+          conversationId,
+          attachments: uploadedFileIds.length > 0 ? uploadedFileIds : body.attachments,
+        };
+
+        // Remove encryptedFiles from messageData (no longer needed)
+        delete (messageData as any).encryptedFiles;
+
+      } else {
+        // Regular JSON message (text only)
+        messageData = {
+          ...body,
+          conversationId,
+        };
+      }
+    }
+    // ==========================================
+    // ✨ CASE 2: NON-ENCRYPTED FILES (FormData)
+    // ==========================================
+    else if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       
-      // ✨ Get encrypted content and metadata
       const content = formData.get('content') as string | null;
       const encryptedContent = formData.get('encryptedContent') as string | null;
       const encryptionMetadataStr = formData.get('encryptionMetadata') as string | null;
@@ -85,20 +157,19 @@ export async function POST(
       const replyTo = formData.get('replyTo') as string | null;
       const files = formData.getAll('files') as File[];
 
-      console.log(`📤 Uploading ${files.length} files of type: ${type}`);
-      console.log(`🔐 FormData - Has encrypted content: ${!!encryptedContent}`);
+      console.log(`📤 FormData: Uploading ${files.length} non-encrypted files of type: ${type}`);
+      console.log(`🔐 FormData - Has encrypted text content: ${!!encryptedContent}`);
 
-      // Upload files
+      // Upload non-encrypted files (backward compatible)
       const uploadResult = await uploadMultipleFiles(files, 'chatapp/messages', userId);
 
       if (uploadResult.failed.length > 0) {
         console.warn('⚠️ Some files failed to upload:', uploadResult.failed);
       }
 
-      // Get IDs of successfully uploaded files
       const attachmentIds = uploadResult.successful.map(file => file.id);
 
-      // ✨ Parse encryption metadata if present
+      // Parse encryption metadata for text content
       let encryptionMetadata = null;
       if (encryptionMetadataStr) {
         try {
@@ -110,34 +181,29 @@ export async function POST(
 
       messageData = {
         conversationId,
-        content: content || undefined, // Optional plaintext
-        encryptedContent: encryptedContent || undefined, // ✨ Encrypted content
-        encryptionMetadata: encryptionMetadata || undefined, // ✨ Encryption metadata
+        content: content || undefined,
+        encryptedContent: encryptedContent || undefined,
+        encryptionMetadata: encryptionMetadata || undefined,
         type: type as any,
         attachments: attachmentIds.length > 0 ? attachmentIds : undefined,
         replyTo: replyTo || undefined,
       };
 
-      console.log(`✅ Created message with ${attachmentIds.length} attachments and E2EE: ${!!encryptedContent}`);
-    } else {
-      // Regular JSON request
-      const body = await req.json();
-      
-      // ✨ Log E2EE info for debugging
-      console.log('📨 JSON request received:', {
-        hasEncryptedContent: !!body.encryptedContent,
-        hasPlaintextContent: !!body.content,
-        type: body.type,
-        bodyKeys: Object.keys(body)
-      });
-
-      messageData = {
-        ...body,
-        conversationId,
-      };
+      console.log(`✅ FormData message created with ${attachmentIds.length} attachments`);
+    }
+    // ==========================================
+    // ✨ CASE 3: INVALID REQUEST
+    // ==========================================
+    else {
+      return NextResponse.json(
+        { success: false, error: "Invalid content type" },
+        { status: 400 }
+      );
     }
 
-    // ✨ Enhanced validation for E2EE
+    // ==========================================
+    // ✨ VALIDATION
+    // ==========================================
     if (!messageData.type) {
       return NextResponse.json(
         { success: false, error: "Missing required field: type" },
@@ -145,8 +211,8 @@ export async function POST(
       );
     }
 
-    // ✨ For text messages, encrypted content is REQUIRED
-    if (messageData.type === 'text') {
+    // ✨ For text messages without attachments, encrypted content is REQUIRED
+    if (messageData.type === 'text' && (!messageData.attachments || messageData.attachments.length === 0)) {
       if (!messageData.encryptedContent) {
         console.error('❌ Text message missing encrypted content:', {
           hasEncryptedContent: !!messageData.encryptedContent,
@@ -171,10 +237,13 @@ export async function POST(
       hasContent: !!messageData.content,
       hasEncryptedContent: !!messageData.encryptedContent,
       hasEncryptionMetadata: !!messageData.encryptionMetadata,
-      hasAttachments: !!messageData.attachments?.length
+      hasAttachments: !!messageData.attachments?.length,
+      attachmentsCount: messageData.attachments?.length || 0
     });
 
-    // Create message
+    // ==========================================
+    // ✨ CREATE MESSAGE
+    // ==========================================
     const result = await createMessage(messageData);
 
     if (!result.success) {
