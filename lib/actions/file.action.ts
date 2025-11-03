@@ -365,3 +365,279 @@ export const getFilesByType = async (
     return [];
   }
 };
+
+/**
+ * ✨ NEW: Upload encrypted file to Cloudinary with AUTHENTICATED access
+ * Backward compatible - không ảnh hưởng uploadFileToCloudinary cũ
+ */
+export const uploadEncryptedFileToCloudinary = async (
+  encryptedBase64: string, // Base64 của encrypted file
+  originalFileName: string,
+  originalFileType: string,
+  encryptionMetadata: {
+    iv: string;
+    auth_tag: string;
+    original_size: number;
+    encrypted_size: number;
+  },
+  folder: string = "chatapp/encrypted"
+): Promise<FileUploadResult> => {
+  try {
+    console.log('🚀 Uploading encrypted file:', originalFileName);
+
+    validateCloudinaryConfig();
+    await connectToDatabase();
+
+    // ✅ Upload encrypted file as RAW với AUTHENTICATED access
+    const dataURI = `data:application/octet-stream;base64,${encryptedBase64}`;
+    
+    const timestamp = Date.now();
+    const randomString = Math.random().toString(36).substring(2);
+    const fileNameWithoutExt = originalFileName
+      .split(".")[0]
+      .replace(/[^a-zA-Z0-9]/g, "_");
+    const publicId = `${timestamp}_${randomString}_${fileNameWithoutExt}_enc`;
+
+    console.log('📤 Uploading as AUTHENTICATED resource...');
+
+    // ✅ Upload với type="authenticated" để bảo vệ
+    const uploadResult = await cloudinary.uploader.upload(dataURI, {
+      folder: folder,
+      resource_type: "raw", // Upload as binary
+      public_id: publicId,
+      type: "authenticated", // ✅ QUAN TRỌNG: Không public
+      access_mode: "authenticated", // ✅ Yêu cầu signed URL
+    });
+
+    console.log('✅ Uploaded as AUTHENTICATED resource:', uploadResult.secure_url);
+
+    // ✅ Save metadata to DB
+    const fileData = {
+      file_name: originalFileName,
+      file_type: originalFileType,
+      file_size: encryptionMetadata.encrypted_size,
+      file_path: uploadResult.public_id,
+      url: uploadResult.secure_url, // Cần signed URL để access
+      is_encrypted: true, // ✨ Mark as encrypted
+      encryption_metadata: encryptionMetadata,
+    };
+
+    const savedFile = await File.create(fileData);
+    console.log('✅ Encrypted file saved to DB:', savedFile._id);
+
+    const fileResponse: FileRes = {
+      id: savedFile._id.toString(),
+      file_name: savedFile.file_name,
+      file_type: savedFile.file_type,
+      file_size: savedFile.file_size,
+      file_path: savedFile.file_path,
+      url: savedFile.url,
+      created_at: savedFile.created_at,
+      is_encrypted: savedFile.is_encrypted, // ✨ NEW
+      encryption_metadata: savedFile.encryption_metadata, // ✨ NEW
+    };
+
+    return {
+      success: true,
+      file: fileResponse,
+    };
+  } catch (error) {
+    console.error('❌ Encrypted file upload error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to upload encrypted file',
+    };
+  }
+};
+
+/**
+ * ✨ NEW: Generate signed URL for encrypted file
+ * Chỉ có thời hạn 1 giờ, sau đó expired
+ */
+export const generateSignedFileUrl = async (
+  fileId: string,
+  userId: string // Clerk userId
+): Promise<{ success: boolean; signedUrl?: string; metadata?: any; error?: string }> => {
+  try {
+    await connectToDatabase();
+
+    const file = await File.findById(fileId);
+    if (!file) {
+      throw new Error('File not found');
+    }
+
+    if (!file.is_encrypted) {
+      // ✅ Non-encrypted files trả về URL thông thường
+      return {
+        success: true,
+        signedUrl: file.url,
+        metadata: {
+          file_name: file.file_name,
+          file_type: file.file_type,
+          file_size: file.file_size,
+          is_encrypted: false,
+        },
+      };
+    }
+
+    console.log('🔐 Generating signed URL for encrypted file:', file.file_name);
+
+    // ✅ Verify user có quyền access (kiểm tra trong message)
+    const Message = (await import('@/database/message.model')).default;
+    const message = await Message.findOne({
+      attachments: fileId,
+    }).populate({
+      path: 'conversation',
+      populate: {
+        path: 'participants',
+        select: 'clerkId',
+      },
+    });
+
+    if (!message) {
+      throw new Error('File not found in any message');
+    }
+
+    // ✅ Check if user is participant
+    const conversation = message.conversation as any;
+    const isParticipant = conversation.participants.some(
+      (p: any) => p.clerkId === userId
+    );
+
+    if (!isParticipant) {
+      throw new Error('Unauthorized to access this file');
+    }
+
+    // ✅ Generate signed URL với expiration (1 hour)
+    const timestamp = Math.floor(Date.now() / 1000) + 3600; // Expire in 1 hour
+    
+    const signedUrl = cloudinary.url(file.file_path, {
+      resource_type: 'raw',
+      type: 'authenticated',
+      sign_url: true,
+      secure: true,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      timestamp: timestamp,
+    });
+
+    console.log('✅ Generated signed URL (expires in 1h)');
+
+    return {
+      success: true,
+      signedUrl,
+      metadata: {
+        iv: file.encryption_metadata?.iv,
+        auth_tag: file.encryption_metadata?.auth_tag,
+        original_size: file.encryption_metadata?.original_size,
+        encrypted_size: file.encryption_metadata?.encrypted_size,
+        file_name: file.file_name,
+        file_type: file.file_type,
+      },
+    };
+  } catch (error) {
+    console.error('❌ Failed to generate signed URL:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to generate URL',
+    };
+  }
+};
+
+/**
+ * ✨ NEW: Download encrypted file from Cloudinary
+ * Returns base64 encrypted data + metadata
+ */
+export const downloadEncryptedFile = async (
+  fileId: string,
+  userId: string
+): Promise<{ success: boolean; encryptedData?: string; metadata?: any; error?: string }> => {
+  try {
+    console.log('📥 Downloading encrypted file:', fileId);
+
+    // ✅ Generate signed URL first
+    const signedResult = await generateSignedFileUrl(fileId, userId);
+    
+    if (!signedResult.success || !signedResult.signedUrl) {
+      throw new Error(signedResult.error || 'Failed to generate signed URL');
+    }
+
+    // ✅ Download file từ Cloudinary
+    const response = await fetch(signedResult.signedUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.statusText}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64Data = buffer.toString('base64');
+
+    console.log('✅ Downloaded encrypted file, size:', buffer.length);
+
+    return {
+      success: true,
+      encryptedData: base64Data,
+      metadata: signedResult.metadata,
+    };
+  } catch (error) {
+    console.error('❌ Download encrypted file error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to download file',
+    };
+  }
+};
+
+/**
+ * ✨ NEW: Delete encrypted file (override để xử lý authenticated type)
+ */
+export const deleteEncryptedFileFromCloudinary = async (
+  fileId: string
+): Promise<FileDeleteResult> => {
+  try {
+    console.log(`🗑️ Deleting encrypted file ID: ${fileId}`);
+
+    validateCloudinaryConfig();
+    await connectToDatabase();
+
+    const file = await File.findById(fileId);
+    if (!file) {
+      throw new Error('File not found in database');
+    }
+
+    if (!file.is_encrypted) {
+      // ✅ Fallback to normal deletion for non-encrypted files
+      return await deleteFileFromCloudinary(fileId);
+    }
+
+    console.log('🌥️ Deleting authenticated resource from Cloudinary...');
+    
+    // ✅ Delete với type="authenticated"
+    const deleteResult = await cloudinary.uploader.destroy(file.file_path, {
+      resource_type: 'raw',
+      type: 'authenticated', // ✅ QUAN TRỌNG
+      invalidate: true,
+    });
+
+    console.log('Cloudinary deletion result:', deleteResult);
+
+    if (deleteResult.result !== 'ok' && deleteResult.result !== 'not found') {
+      throw new Error(`Cloudinary deletion failed: ${JSON.stringify(deleteResult)}`);
+    }
+
+    // ✅ Delete from DB
+    await File.findByIdAndDelete(fileId);
+    console.log('✅ Encrypted file deleted successfully');
+
+    return {
+      success: true,
+      message: `Encrypted file "${file.file_name}" deleted successfully`,
+    };
+  } catch (error) {
+    console.error('❌ Encrypted file deletion error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to delete encrypted file',
+    };
+  }
+};
