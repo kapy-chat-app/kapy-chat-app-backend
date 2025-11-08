@@ -11,9 +11,11 @@ import { HuggingFaceService } from "../services/huggingface.service";
 import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitSocketEvent } from "../socket.helper";
 import { analyzeMessageEmotionsAsync } from "./emotion.action";
+import { uploadEncryptedFileToCloudinary } from "./file.action";
 
 // ============================================
-// CREATE MESSAGE - WITH E2EE + EMOTION ANALYSIS
+// CREATE MESSAGE - CLOUDINARY E2EE VERSION
+// Encrypted files đã được upload lên Cloudinary trước
 // ============================================
 export async function createMessage(data: CreateMessageDTO) {
   try {
@@ -23,11 +25,11 @@ export async function createMessage(data: CreateMessageDTO) {
 
     const { 
       conversationId, 
-      content, // Plaintext gốc (OPTIONAL - chỉ để AI analysis)
-      encryptedContent, // ✨ Encrypted content từ client (camelCase)
-      encryptionMetadata, // ✨ Encryption metadata từ client (camelCase)
+      content, // Plaintext (CHO AI analysis)
+      encryptedContent, // ✨ Encrypted content
+      encryptionMetadata, // ✨ Encryption metadata
       type, 
-      attachments, 
+      attachments, // ✅ File IDs (đã upload lên Cloudinary)
       replyTo 
     } = data;
 
@@ -35,6 +37,7 @@ export async function createMessage(data: CreateMessageDTO) {
       hasContent: !!content,
       hasEncryptedContent: !!encryptedContent,
       hasEncryptionMetadata: !!encryptionMetadata,
+      attachmentsCount: attachments?.length || 0,
       type,
       conversationId
     });
@@ -56,11 +59,7 @@ export async function createMessage(data: CreateMessageDTO) {
     // ✨ E2EE Validation: Encrypted content is REQUIRED for text messages
     if (type === "text") {
       if (!encryptedContent || encryptedContent.trim().length === 0) {
-        console.error('❌ Text message validation failed:', {
-          hasEncryptedContent: !!encryptedContent,
-          encryptedContentLength: encryptedContent?.length,
-          type
-        });
+        console.error('❌ Text message validation failed');
         throw new Error("Text messages must have encrypted content for E2EE");
       }
       console.log('✅ Text message has valid encrypted content');
@@ -76,37 +75,42 @@ export async function createMessage(data: CreateMessageDTO) {
       }
     }
 
-    // ✨ Create message with ENCRYPTED content
+    // ✅ Attachments are already uploaded to Cloudinary
+    const allAttachmentIds = attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [];
+
+    console.log('📎 Total attachments:', allAttachmentIds.length);
+
+    // ✨ Create message with encrypted content
     const message = await Message.create({
       conversation: conversationId,
       sender: user._id,
-      content: content?.trim(), // Optional plaintext (CHỈ dùng cho AI analysis, KHÔNG gửi qua socket)
-      encrypted_content: encryptedContent, // ✨ Lưu encrypted content (snake_case cho DB)
-      encryption_metadata: encryptionMetadata, // ✨ Lưu metadata (snake_case cho DB)
-      type,
-      attachments:
-        attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [],
+      content: content?.trim(), // ✅ Plaintext (cho AI analysis)
+      encrypted_content: encryptedContent, // ✨ Encrypted content
+      encryption_metadata: encryptionMetadata, // ✨ Metadata
+      type: type || (allAttachmentIds.length > 0 ? 'file' : 'text'),
+      attachments: allAttachmentIds,
       reply_to: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined,
     });
 
-    console.log(`🔐 Message created with E2EE: ${message._id}`);
+    console.log(`🔐 Message created with E2EE: ${message._id}`, {
+      hasEncryptedContent: !!encryptedContent,
+      hasPlaintext: !!content,
+      attachmentsCount: allAttachmentIds.length,
+    });
 
     // ==========================================
-    // 🤖 AI EMOTION ANALYSIS FOR TEXT MESSAGES
-    // (GIỮ NGUYÊN - Chỉ chạy nếu có plaintext)
+    // 🤖 AI EMOTION ANALYSIS (nếu có plaintext)
     // ==========================================
     if (type === "text" && content && content.trim().length > 0) {
       try {
         console.log(`🔍 Analyzing emotion for message: ${message._id}`);
         
-        // Call HuggingFace AI to analyze emotion
         const emotionResult = await HuggingFaceService.analyzeEmotion(
           content.trim()
         );
 
-        console.log(`✅ Emotion detected: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
+        console.log(`✅ Emotion: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
 
-        // Create EmotionAnalysis record
         const emotionAnalysis = await EmotionAnalysis.create({
           user: user._id,
           message: message._id,
@@ -119,9 +123,6 @@ export async function createMessage(data: CreateMessageDTO) {
           analyzed_at: new Date()
         });
 
-        console.log(`💾 EmotionAnalysis created: ${emotionAnalysis._id}`);
-
-        // Optional: Emit emotion update via socket
         await emitSocketEvent(
           "emotionAnalyzed",
           conversationId,
@@ -129,21 +130,15 @@ export async function createMessage(data: CreateMessageDTO) {
             message_id: message._id.toString(),
             emotion: emotionResult.emotion,
             score: emotionResult.score,
-            method: emotionResult.method,
             analysis_id: emotionAnalysis._id.toString()
           },
-          false // Don't send to sender
+          false
         );
 
       } catch (emotionError) {
-        // Don't fail message creation if emotion analysis fails
         console.error("❌ Emotion analysis failed:", emotionError);
-        // Continue with message creation
       }
-    } else if (type === "text") {
-      console.log(`⚠️ No plaintext provided - skipping emotion analysis for message: ${message._id}`);
     }
-    // ==========================================
 
     // Update conversation last message
     await Conversation.findByIdAndUpdate(conversationId, {
@@ -158,14 +153,23 @@ export async function createMessage(data: CreateMessageDTO) {
         select: "clerkId full_name username avatar",
         populate: { path: "avatar", select: "url" },
       })
-      .populate("attachments", "file_name file_type file_size url")
+      .populate({
+        path: "attachments",
+        select: "file_name file_type file_size url cloudinary_public_id is_encrypted encryption_metadata",
+      })
       .populate({
         path: "reply_to",
-        populate: {
-          path: "sender",
-          select: "clerkId full_name username avatar",
-          populate: { path: "avatar", select: "url" },
-        },
+        populate: [
+          {
+            path: "sender",
+            select: "clerkId full_name username avatar",
+            populate: { path: "avatar", select: "url" },
+          },
+          {
+            path: "attachments",
+            select: "file_name file_type file_size url cloudinary_public_id is_encrypted encryption_metadata",
+          },
+        ],
       })
       .populate({
         path: "read_by.user",
@@ -201,7 +205,40 @@ export async function createMessage(data: CreateMessageDTO) {
       }));
     }
 
-    // ✨ Emit new message event via socket - GỬI ENCRYPTED CONTENT
+    // ✅ Transform attachments WITH encryption info (NO encrypted_data)
+    if (messageObj.attachments && messageObj.attachments.length > 0) {
+      messageObj.attachments = messageObj.attachments.map((att: any) => ({
+        _id: att._id.toString(),
+        file_name: att.file_name,
+        file_type: att.file_type,
+        file_size: att.file_size,
+        url: att.url, // ✅ Cloudinary URL (authenticated, không access trực tiếp được)
+        cloudinary_public_id: att.cloudinary_public_id,
+        is_encrypted: att.is_encrypted || false,
+        encryption_metadata: att.encryption_metadata || null,
+        // ❌ KHÔNG có encrypted_data (file nằm trên Cloudinary)
+      }));
+
+      console.log('✅ Transformed attachments:', {
+        count: messageObj.attachments.length,
+        encrypted: messageObj.attachments.filter((a: any) => a.is_encrypted).length,
+      });
+    }
+
+    if (messageObj.reply_to?.attachments && messageObj.reply_to.attachments.length > 0) {
+      messageObj.reply_to.attachments = messageObj.reply_to.attachments.map((att: any) => ({
+        _id: att._id.toString(),
+        file_name: att.file_name,
+        file_type: att.file_type,
+        file_size: att.file_size,
+        url: att.url,
+        cloudinary_public_id: att.cloudinary_public_id,
+        is_encrypted: att.is_encrypted || false,
+        encryption_metadata: att.encryption_metadata || null,
+      }));
+    }
+
+    // ✨ Emit socket event
     await emitSocketEvent(
       "newMessage",
       conversationId,
@@ -212,35 +249,36 @@ export async function createMessage(data: CreateMessageDTO) {
         sender_name: user.full_name,
         sender_username: user.username,
         sender_avatar: messageObj.sender.avatar,
-        message_content: undefined, // ✨ KHÔNG GỬI PLAINTEXT qua socket
-        encrypted_content: encryptedContent, // ✨ GỬI ENCRYPTED CONTENT
-        encryption_metadata: encryptionMetadata, // ✨ GỬI METADATA
+        message_content: undefined, // ✅ KHÔNG GỬI PLAINTEXT
+        encrypted_content: encryptedContent, // ✅ GỬI ENCRYPTED
+        encryption_metadata: encryptionMetadata,
         message_type: type,
         message: {
           ...messageObj,
           _id: messageObj._id.toString(),
           conversation: conversationId,
-          content: undefined, // ✨ XÓA plaintext khỏi response
-          encrypted_content: encryptedContent, // ✨ THÊM encrypted content (camelCase cho response)
-          encryption_metadata: encryptionMetadata, // ✨ THÊM metadata (camelCase cho response)
+          content: undefined, // ✅ XÓA plaintext
+          encrypted_content: encryptedContent,
+          encryption_metadata: encryptionMetadata,
+          attachments: messageObj.attachments,
           created_at: messageObj.created_at || new Date(),
           updated_at: messageObj.updated_at || new Date(),
         },
       },
-      true // Send to all participants including sender
+      true
     );
 
     console.log('✅ Socket event emitted with encrypted content');
 
-    // ✨ XÓA plaintext trước khi trả về client
-    delete messageObj.content;
-
+    // ✅ Return full data cho người gửi (kể cả plaintext)
     return {
       success: true,
       data: {
         ...messageObj,
-        encrypted_content: encryptedContent, // ✨ Trả về encrypted content (camelCase)
-        encryption_metadata: encryptionMetadata, // ✨ Trả về metadata (camelCase)
+        content: content?.trim(), // ✅ GIỮ PLAINTEXT cho người gửi
+        encrypted_content: encryptedContent,
+        encryption_metadata: encryptionMetadata,
+        attachments: messageObj.attachments,
       },
     };
   } catch (error) {
@@ -253,8 +291,9 @@ export async function createMessage(data: CreateMessageDTO) {
   }
 }
 
+
 // ============================================
-// GET MESSAGES - WITH E2EE SUPPORT
+// GET MESSAGES - WITH E2EE SUPPORT + ENCRYPTED FILES
 // ============================================
 export async function getMessages(
   conversationId: string,
@@ -306,13 +345,13 @@ export async function getMessages(
       { $sort: { created_at: -1 } },
       { $skip: skip },
       { $limit: limit },
-      // ✨ PROJECT: Đảm bảo trả về encrypted_content và encryption_metadata
       {
         $project: {
           conversation: 1,
           sender: 1,
-          encrypted_content: 1, // ✨ TRẢ VỀ encrypted content
-          encryption_metadata: 1, // ✨ TRẢ VỀ metadata
+          content: 1, // ✅ Plaintext content (cho AI analysis)
+          encrypted_content: 1, // ✨ Encrypted content
+          encryption_metadata: 1, // ✨ Encryption metadata
           type: 1,
           attachments: 1,
           reply_to: 1,
@@ -326,7 +365,7 @@ export async function getMessages(
           updated_at: 1,
         },
       },
-      // ✅ POPULATE sender (GIỮ NGUYÊN)
+      // ✅ POPULATE sender
       {
         $lookup: {
           from: "users",
@@ -356,16 +395,32 @@ export async function getMessages(
         },
       },
       { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
-      // ✅ POPULATE attachments (GIỮ NGUYÊN)
+      // ✨ UPDATED: POPULATE attachments - CHỈ LẤY METADATA
       {
         $lookup: {
           from: "files",
           localField: "attachments",
           foreignField: "_id",
           as: "attachments",
+          pipeline: [
+            {
+              $project: {
+                _id: 1,
+                file_name: 1,
+                file_type: 1,
+                file_size: 1,
+                url: 1, // ✅ Cloudinary URL (sẽ không access trực tiếp được nếu encrypted)
+                cloudinary_public_id: 1,
+                is_encrypted: 1, // ✨ E2EE flag
+                encryption_metadata: 1, // ✨ E2EE metadata (iv, auth_tag, sizes)
+                // ❌ KHÔNG LẤY encrypted_data (không còn trong DB)
+                created_at: 1,
+              },
+            },
+          ],
         },
       },
-      // ✅ POPULATE reply_to (GIỮ NGUYÊN)
+      // ✨ UPDATED: POPULATE reply_to WITH E2EE files
       {
         $lookup: {
           from: "messages",
@@ -373,11 +428,11 @@ export async function getMessages(
           foreignField: "_id",
           as: "reply_to",
           pipeline: [
-            // ✨ XÓA content, GIỮ encrypted_content trong reply_to
             {
               $project: {
-                encrypted_content: 1, // ✨ TRẢ VỀ encrypted
-                encryption_metadata: 1, // ✨ TRẢ VỀ metadata
+                content: 1,
+                encrypted_content: 1,
+                encryption_metadata: 1,
                 sender: 1,
                 type: 1,
                 attachments: 1,
@@ -416,19 +471,34 @@ export async function getMessages(
               },
             },
             { $unwind: { path: "$sender", preserveNullAndEmptyArrays: true } },
+            // ✨ Populate attachments in reply_to - CHỈ METADATA
             {
               $lookup: {
                 from: "files",
                 localField: "attachments",
                 foreignField: "_id",
                 as: "attachments",
+                pipeline: [
+                  {
+                    $project: {
+                      _id: 1,
+                      file_name: 1,
+                      file_type: 1,
+                      file_size: 1,
+                      url: 1,
+                      cloudinary_public_id: 1,
+                      is_encrypted: 1,
+                      encryption_metadata: 1,
+                    },
+                  },
+                ],
               },
             },
           ],
         },
       },
       { $unwind: { path: "$reply_to", preserveNullAndEmptyArrays: true } },
-      // ✅ POPULATE read_by users (GIỮ NGUYÊN)
+      // ✅ POPULATE read_by users
       {
         $lookup: {
           from: "users",
@@ -475,7 +545,7 @@ export async function getMessages(
           },
         },
       },
-      // ✅ Populate avatars for read_by users (GIỮ NGUYÊN)
+      // ✅ Populate avatars for read_by users
       {
         $lookup: {
           from: "files",
@@ -553,12 +623,21 @@ export async function getMessages(
       ],
     });
 
-    console.log(`🔐 Retrieved ${messages.length} encrypted messages for conversation: ${conversationId}`);
+    // ✨ Log E2EE stats
+    const encryptedFilesCount = messages.reduce((count, msg) => {
+      return count + (msg.attachments?.filter((a: any) => a.is_encrypted).length || 0);
+    }, 0);
+
+    console.log(`🔐 Retrieved ${messages.length} messages (${encryptedFilesCount} encrypted files)`, {
+      conversationId,
+      totalMessages: messages.length,
+      encryptedFiles: encryptedFilesCount,
+    });
 
     return {
       success: true,
       data: {
-        messages: messages.reverse(), // Trả về encrypted messages
+        messages: messages.reverse(),
         pagination: {
           page,
           limit,

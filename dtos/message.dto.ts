@@ -3,18 +3,27 @@ import { SearchUserResponseDto } from "./friend.dto";
 
 export interface CreateMessageDTO {
   conversationId: string;
-  content?: string; // Optional plaintext (chỉ cho AI emotion analysis)
-  encryptedContent?: string; // ✨ Required for text messages
+  content?: string;
+  encryptedContent?: string;
   encryptionMetadata?: {
-    type: 'prekey' | 'whisper';
-    preKeyId?: number;
-    registrationId?: number;
-    baseKey?: string;
-    identityKey?: string;
-    signedPreKeyId?: number;
+    type: "PreKeyWhisperMessage" | "WhisperMessage";
+    registration_id?: number;
+    pre_key_id?: number;
+    signed_pre_key_id?: number;
   };
-  type: 'text' | 'image' | 'video' | 'audio' | 'file';
+  type?: "text" | "image" | "video" | "audio" | "file" | "voice_note" | "location";
   attachments?: string[];
+  encryptedFiles?: Array<{ // ✅ NEW
+    encryptedBase64: string;
+    originalFileName: string;
+    originalFileType: string;
+    encryptionMetadata: {
+      iv: string;
+      auth_tag: string;
+      original_size: number;
+      encrypted_size: number;
+    };
+  }>;
   replyTo?: string;
 }
 
