@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// app/api/conversations/[id]/messages/route.ts - UPDATED WITH ENCRYPTED FILES
+// app/api/conversations/[id]/messages/route.ts - CLOUDINARY E2EE VERSION
+
 import { CreateMessageDTO } from "@/dtos/message.dto";
-import { uploadMultipleFiles, uploadEncryptedFileToCloudinary } from "@/lib/actions/file.action"; // ✅ ADD uploadEncryptedFileToCloudinary
+import { uploadMultipleFiles, uploadEncryptedFileToCloudinary } from "@/lib/actions/file.action";
 import {
   removeReaction,
   deleteMessage,
@@ -82,7 +83,6 @@ export async function POST(
         hasPlaintextContent: !!body.content,
         hasEncryptedFiles: !!body.encryptedFiles,
         type: body.type,
-        bodyKeys: Object.keys(body)
       });
 
       // ✅ NEW: Handle encrypted files from mobile
@@ -105,7 +105,9 @@ export async function POST(
               continue;
             }
 
-            // Upload encrypted file
+            console.log(`📤 Uploading encrypted file to Cloudinary: ${originalFileName}`);
+
+            // ✅ Upload encrypted file to Cloudinary
             const uploadResult = await uploadEncryptedFileToCloudinary(
               encryptedBase64,
               originalFileName,
@@ -115,16 +117,16 @@ export async function POST(
 
             if (uploadResult.success && uploadResult.file) {
               uploadedFileIds.push(uploadResult.file.id);
-              console.log('✅ Encrypted file uploaded:', originalFileName);
+              console.log(`✅ Encrypted file uploaded to Cloudinary: ${originalFileName} (ID: ${uploadResult.file.id})`);
             } else {
-              console.error('❌ Failed to upload encrypted file:', originalFileName);
+              console.error(`❌ Failed to upload encrypted file: ${originalFileName}`, uploadResult.error);
             }
           } catch (error) {
             console.error('❌ Error uploading encrypted file:', error);
           }
         }
 
-        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files`);
+        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files to Cloudinary`);
 
         // Add uploaded file IDs to message
         messageData = {
@@ -158,7 +160,6 @@ export async function POST(
       const files = formData.getAll('files') as File[];
 
       console.log(`📤 FormData: Uploading ${files.length} non-encrypted files of type: ${type}`);
-      console.log(`🔐 FormData - Has encrypted text content: ${!!encryptedContent}`);
 
       // Upload non-encrypted files (backward compatible)
       const uploadResult = await uploadMultipleFiles(files, 'chatapp/messages', userId);
@@ -214,11 +215,7 @@ export async function POST(
     // ✨ For text messages without attachments, encrypted content is REQUIRED
     if (messageData.type === 'text' && (!messageData.attachments || messageData.attachments.length === 0)) {
       if (!messageData.encryptedContent) {
-        console.error('❌ Text message missing encrypted content:', {
-          hasEncryptedContent: !!messageData.encryptedContent,
-          hasContent: !!messageData.content,
-          type: messageData.type
-        });
+        console.error('❌ Text message missing encrypted content');
         return NextResponse.json(
           { 
             success: false, 
@@ -230,13 +227,11 @@ export async function POST(
       console.log('✅ Text message has encrypted content');
     }
 
-    // ✨ Debug log before calling createMessage
     console.log('📨 Calling createMessage with:', {
       conversationId: messageData.conversationId,
       type: messageData.type,
       hasContent: !!messageData.content,
       hasEncryptedContent: !!messageData.encryptedContent,
-      hasEncryptionMetadata: !!messageData.encryptionMetadata,
       hasAttachments: !!messageData.attachments?.length,
       attachmentsCount: messageData.attachments?.length || 0
     });
@@ -254,7 +249,7 @@ export async function POST(
       );
     }
 
-    console.log('✅ Message created successfully with E2EE');
+    console.log('✅ Message created successfully with Cloudinary E2EE');
 
     return NextResponse.json(
       {
@@ -275,3 +270,5 @@ export async function POST(
     );
   }
 }
+
+// ✅ Keep other methods (DELETE, PATCH, etc.)
