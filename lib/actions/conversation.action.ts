@@ -87,93 +87,242 @@ export async function getConversations(page: number = 1, limit: number = 20) {
 
     const skip = (page - 1) * limit;
 
-    const conversations = await Conversation.find({
-      participants: user._id,
-      is_archived: false
-    })
-    .populate({
-      path: 'participants',
-      select: 'clerkId full_name username avatar is_online last_seen',
-      populate: {
-        path: 'avatar',
-        select: 'url name type'
-      }
-    })
-    .populate({
-      path: 'last_message',
-      populate: [
-        {
-          path: 'sender',
-          select: 'clerkId full_name username avatar',
-          populate: {
-            path: 'avatar',
-            select: 'url name type'
-          }
-        },
-        {
-          path: 'attachments',
-          select: 'url name type size'
+    // ✅ Sử dụng aggregation pipeline để tối ưu hiệu năng
+    const conversations = await Conversation.aggregate([
+      // Stage 1: Lọc conversations của user
+      {
+        $match: {
+          participants: user._id,
+          is_archived: false
         }
-      ]
-    })
-    .populate('avatar', 'url name type')
-    .sort({ is_pinned: -1, last_activity: -1 })
-    .skip(skip)
-    .limit(limit);
+      },
+      
+      // Stage 2: Sắp xếp
+      {
+        $sort: { is_pinned: -1, last_activity: -1 }
+      },
+      
+      // Stage 3: Phân trang
+      {
+        $skip: skip
+      },
+      {
+        $limit: limit
+      },
+      
+      // Stage 4: Tính số tin nhắn chưa đọc (1 query duy nhất)
+      {
+        $lookup: {
+          from: 'messages',
+          let: { convId: '$_id', userId: user._id },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$conversation', '$$convId'] },
+                    { $ne: ['$sender', '$$userId'] },
+                    {
+                      $not: {
+                        $in: ['$$userId', { $ifNull: ['$read_by.user', []] }]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            { $count: 'count' }
+          ],
+          as: 'unreadMessages'
+        }
+      },
+      
+      // Stage 5: Thêm field unreadCount
+      {
+        $addFields: {
+          unreadCount: {
+            $ifNull: [{ $arrayElemAt: ['$unreadMessages.count', 0] }, 0]
+          }
+        }
+      },
+      
+      // Stage 6: Populate participants
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'participants',
+          foreignField: '_id',
+          as: 'participants'
+        }
+      },
+      
+      // Stage 7: Populate avatar của participants
+      {
+        $lookup: {
+          from: 'files',
+          localField: 'participants.avatar',
+          foreignField: '_id',
+          as: 'participantAvatars'
+        }
+      },
+      
+      // Stage 8: Populate last_message
+      {
+        $lookup: {
+          from: 'messages',
+          localField: 'last_message',
+          foreignField: '_id',
+          as: 'last_message'
+        }
+      },
+      {
+        $unwind: {
+          path: '$last_message',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      
+      // Stage 9: Populate sender của last_message
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'last_message.sender',
+          foreignField: '_id',
+          as: 'lastMessageSender'
+        }
+      },
+      {
+        $unwind: {
+          path: '$lastMessageSender',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      
+      // Stage 10: Populate avatar của sender
+      {
+        $lookup: {
+          from: 'files',
+          localField: 'lastMessageSender.avatar',
+          foreignField: '_id',
+          as: 'lastMessageSenderAvatar'
+        }
+      },
+      
+      // Stage 11: Populate attachments của last_message
+      {
+        $lookup: {
+          from: 'files',
+          localField: 'last_message.attachments',
+          foreignField: '_id',
+          as: 'lastMessageAttachments'
+        }
+      },
+      
+      // Stage 12: Populate avatar của conversation
+      {
+        $lookup: {
+          from: 'files',
+          localField: 'avatar',
+          foreignField: '_id',
+          as: 'conversationAvatar'
+        }
+      },
+      
+      // Stage 13: Xóa field tạm và format lại data
+      {
+        $project: {
+          unreadMessages: 0
+        }
+      }
+    ]);
 
+    // Đếm tổng số conversations
     const total = await Conversation.countDocuments({
       participants: user._id,
       is_archived: false
     });
 
-    const conversationsWithUnread = await Promise.all(
-      conversations.map(async (conv) => {
-        const unreadCount = await Message.countDocuments({
-          conversation: conv._id,
-          'read_by.user': { $ne: user._id },
-          sender: { $ne: user._id }
-        });
+    // ✅ Xử lý data sau aggregation (không cần query thêm)
+    const conversationsWithUnread = conversations.map((conv: any) => {
+      // Map participant avatars
+      const participantAvatarMap = new Map(
+        (conv.participantAvatars || []).map((avatar: any) => [
+          avatar._id.toString(),
+          avatar
+        ])
+      );
 
-        const convData = conv.toJSON();
-
-        // Flatten avatar URLs for participants
-        const participantsWithAvatar = convData.participants?.map((p: any) => ({
-          ...p,
-          avatar: p.avatar?.url || null
-        }));
-
-        // ✅ QUAN TRỌNG: Lấy avatar cho private conversation từ participant
-        let conversationAvatar = convData.avatar?.url || null;
-        
-        // Nếu là private chat và không có avatar, lấy avatar của người kia
-        if (convData.type === 'private' && !conversationAvatar) {
-          const otherParticipant = participantsWithAvatar?.find(
-            (p: any) => p.clerkId !== userId
-          );
-          conversationAvatar = otherParticipant?.avatar || null;
-        }
-
-        // Flatten avatar URL for last_message sender
-        let lastMessage = convData.last_message;
-        if (lastMessage?.sender) {
-          lastMessage = {
-            ...lastMessage,
-            sender: {
-              ...lastMessage.sender,
-              avatar: lastMessage.sender.avatar?.url || null
-            }
-          };
-        }
-
+      // Flatten participants với avatar
+      const participantsWithAvatar = (conv.participants || []).map((p: any) => {
+        const avatarId = p.avatar ? p.avatar.toString() : null;
+        const avatarData: any = avatarId ? participantAvatarMap.get(avatarId) : null;
         return {
-          ...convData,
-          participants: participantsWithAvatar,
-          avatar: conversationAvatar, // ✅ Giờ sẽ có avatar từ participant
-          last_message: lastMessage,
-          unreadCount
+          _id: p._id,
+          clerkId: p.clerkId,
+          full_name: p.full_name,
+          username: p.username,
+          is_online: p.is_online,
+          last_seen: p.last_seen,
+          avatar: avatarData ? (avatarData.url || null) : null
         };
-      })
-    );
+      });
+
+      // Xác định avatar cho conversation
+      const convAvatarData: any = conv.conversationAvatar?.[0];
+      let conversationAvatar = convAvatarData ? (convAvatarData.url || null) : null;
+      
+      // Nếu là private chat và không có avatar, lấy avatar của người kia
+      if (conv.type === 'private' && !conversationAvatar) {
+        const otherParticipant = participantsWithAvatar?.find(
+          (p: any) => p.clerkId !== userId
+        );
+        conversationAvatar = otherParticipant?.avatar || null;
+      }
+
+      // Format last_message
+      let lastMessage = null;
+      if (conv.last_message && conv.lastMessageSender) {
+        const senderAvatarData: any = conv.lastMessageSenderAvatar?.[0];
+        
+        lastMessage = {
+          _id: conv.last_message._id,
+          content: conv.last_message.content,
+          message_type: conv.last_message.message_type,
+          createdAt: conv.last_message.createdAt,
+          updatedAt: conv.last_message.updatedAt,
+          sender: {
+            _id: conv.lastMessageSender._id,
+            clerkId: conv.lastMessageSender.clerkId,
+            full_name: conv.lastMessageSender.full_name,
+            username: conv.lastMessageSender.username,
+            avatar: senderAvatarData ? (senderAvatarData.url || null) : null
+          },
+          attachments: (conv.lastMessageAttachments || []).map((att: any) => ({
+            _id: att._id,
+            url: att.url,
+            name: att.name,
+            type: att.type,
+            size: att.size
+          }))
+        };
+      }
+
+      return {
+        _id: conv._id,
+        type: conv.type,
+        name: conv.name,
+        description: conv.description,
+        is_pinned: conv.is_pinned,
+        is_archived: conv.is_archived,
+        last_activity: conv.last_activity,
+        createdAt: conv.createdAt,
+        updatedAt: conv.updatedAt,
+        participants: participantsWithAvatar,
+        avatar: conversationAvatar,
+        last_message: lastMessage,
+        unreadCount: conv.unreadCount
+      };
+    });
 
     return {
       success: true,
