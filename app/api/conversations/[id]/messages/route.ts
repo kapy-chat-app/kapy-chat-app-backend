@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// app/api/conversations/[id]/messages/route.ts - CLOUDINARY E2EE VERSION
+// app/api/conversations/[id]/messages/route.ts - UPDATED WITH RICH MEDIA
 
 import { CreateMessageDTO } from "@/dtos/message.dto";
 import { uploadMultipleFiles, uploadEncryptedFileToCloudinary } from "@/lib/actions/file.action";
@@ -73,7 +73,7 @@ export async function POST(
     let messageData: CreateMessageDTO;
 
     // ==========================================
-    // ✨ CASE 1: ENCRYPTED FILES (JSON)
+    // ✨ CASE 1: JSON (Text, Encrypted Files, GIF, Sticker)
     // ==========================================
     if (contentType.includes('application/json')) {
       const body = await req.json();
@@ -82,11 +82,31 @@ export async function POST(
         hasEncryptedContent: !!body.encryptedContent,
         hasPlaintextContent: !!body.content,
         hasEncryptedFiles: !!body.encryptedFiles,
+        hasRichMedia: !!body.richMedia, // ✨ NEW
         type: body.type,
       });
 
-      // ✅ NEW: Handle encrypted files from mobile
-      if (body.encryptedFiles && Array.isArray(body.encryptedFiles)) {
+      // ✨ NEW: Validate GIF/Sticker
+      if (body.type === 'gif' || body.type === 'sticker') {
+        if (!body.richMedia || !body.richMedia.provider || !body.richMedia.media_url) {
+          return NextResponse.json(
+            { 
+              success: false, 
+              error: `Rich media data is required for ${body.type} messages` 
+            },
+            { status: 400 }
+          );
+        }
+        
+        console.log(`✨ ${body.type.toUpperCase()} message with rich media from ${body.richMedia.provider}`);
+        
+        messageData = {
+          ...body,
+          conversationId,
+        };
+      }
+      // ✅ Handle encrypted files from mobile
+      else if (body.encryptedFiles && Array.isArray(body.encryptedFiles)) {
         console.log(`🔐 Processing ${body.encryptedFiles.length} encrypted files...`);
 
         const uploadedFileIds: string[] = [];
@@ -107,7 +127,6 @@ export async function POST(
 
             console.log(`📤 Uploading encrypted file to Cloudinary: ${originalFileName}`);
 
-            // ✅ Upload encrypted file to Cloudinary
             const uploadResult = await uploadEncryptedFileToCloudinary(
               encryptedBase64,
               originalFileName,
@@ -117,7 +136,7 @@ export async function POST(
 
             if (uploadResult.success && uploadResult.file) {
               uploadedFileIds.push(uploadResult.file.id);
-              console.log(`✅ Encrypted file uploaded to Cloudinary: ${originalFileName} (ID: ${uploadResult.file.id})`);
+              console.log(`✅ Encrypted file uploaded: ${originalFileName} (ID: ${uploadResult.file.id})`);
             } else {
               console.error(`❌ Failed to upload encrypted file: ${originalFileName}`, uploadResult.error);
             }
@@ -126,16 +145,14 @@ export async function POST(
           }
         }
 
-        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files to Cloudinary`);
+        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files`);
 
-        // Add uploaded file IDs to message
         messageData = {
           ...body,
           conversationId,
           attachments: uploadedFileIds.length > 0 ? uploadedFileIds : body.attachments,
         };
 
-        // Remove encryptedFiles from messageData (no longer needed)
         delete (messageData as any).encryptedFiles;
 
       } else {
@@ -161,7 +178,6 @@ export async function POST(
 
       console.log(`📤 FormData: Uploading ${files.length} non-encrypted files of type: ${type}`);
 
-      // Upload non-encrypted files (backward compatible)
       const uploadResult = await uploadMultipleFiles(files, 'chatapp/messages', userId);
 
       if (uploadResult.failed.length > 0) {
@@ -170,7 +186,6 @@ export async function POST(
 
       const attachmentIds = uploadResult.successful.map(file => file.id);
 
-      // Parse encryption metadata for text content
       let encryptionMetadata = null;
       if (encryptionMetadataStr) {
         try {
@@ -212,6 +227,18 @@ export async function POST(
       );
     }
 
+    // ✨ For GIF/Sticker - rich media is REQUIRED
+    if ((messageData.type === 'gif' || messageData.type === 'sticker') && !messageData.richMedia) {
+      console.error(`❌ ${messageData.type} message missing rich media`);
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: `Rich media is required for ${messageData.type} messages` 
+        },
+        { status: 400 }
+      );
+    }
+
     // ✨ For text messages without attachments, encrypted content is REQUIRED
     if (messageData.type === 'text' && (!messageData.attachments || messageData.attachments.length === 0)) {
       if (!messageData.encryptedContent) {
@@ -232,6 +259,7 @@ export async function POST(
       type: messageData.type,
       hasContent: !!messageData.content,
       hasEncryptedContent: !!messageData.encryptedContent,
+      hasRichMedia: !!messageData.richMedia, // ✨ NEW
       hasAttachments: !!messageData.attachments?.length,
       attachmentsCount: messageData.attachments?.length || 0
     });
@@ -249,7 +277,7 @@ export async function POST(
       );
     }
 
-    console.log('✅ Message created successfully with Cloudinary E2EE');
+    console.log('✅ Message created successfully');
 
     return NextResponse.json(
       {
@@ -270,5 +298,3 @@ export async function POST(
     );
   }
 }
-
-// ✅ Keep other methods (DELETE, PATCH, etc.)

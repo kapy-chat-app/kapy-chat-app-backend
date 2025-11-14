@@ -1,12 +1,12 @@
+// src/database/models/message.model.ts (UPDATE)
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/database/models/message.model.ts
-import mongoose, { Document, model, models, Schema } from "mongoose";
+import mongoose, { Document, Model, model, models, Schema } from "mongoose";
 
 export interface IMessage extends Document {
-  conversation: mongoose.Types.ObjectId; // Ref to Conversation
-  sender: mongoose.Types.ObjectId; // Ref to User
-  content?: string; // Plaintext (optional - chỉ dùng cho AI analysis/search)
-  encrypted_content?: string; // ✨ Nội dung đã mã hóa (REQUIRED cho text messages với E2EE)
+  conversation: mongoose.Types.ObjectId;
+  sender: mongoose.Types.ObjectId;
+  content?: string;
+  encrypted_content?: string;
   encryption_metadata?: {
     type: "PreKeyWhisperMessage" | "WhisperMessage";
     registration_id?: number;
@@ -21,39 +21,97 @@ export interface IMessage extends Document {
     | "file"
     | "voice_note"
     | "location"
-    | "call_log";
-  attachments: mongoose.Types.ObjectId[]; // Ref to File
-  reply_to?: mongoose.Types.ObjectId; // Ref to Message (trả lời tin nhắn)
+    | "call_log"
+    | "gif"
+    | "sticker";
+  attachments: mongoose.Types.ObjectId[];
+  reply_to?: mongoose.Types.ObjectId;
   reactions: {
-    user: mongoose.Types.ObjectId; // Ref to User
-    type: "heart" | "like" | "sad" | "angry" | "laugh" | "wow";
+    user: mongoose.Types.ObjectId;
+    type: "heart" | "like" | "sad" | "angry" | "laugh" | "wow" | "dislike";
     created_at: Date;
   }[];
   is_edited: boolean;
   edited_at?: Date;
   deleted_by: {
-    user: mongoose.Types.ObjectId; // Ref to User
+    user: mongoose.Types.ObjectId;
     deleted_at: Date;
-    delete_type: "both" | "only_me"; // both: thu hồi (cả hai không thấy), only_me: xóa cho mình
+    delete_type: "both" | "only_me";
   }[];
   read_by: {
-    user: mongoose.Types.ObjectId; // Ref to User
+    user: mongoose.Types.ObjectId;
     read_at: Date;
   }[];
-  metadata?: any; // Metadata cho call logs, location, etc.
+  metadata?: any;
+  rich_media?: {
+    provider: "giphy" | "tenor" | "custom" | string;
+    provider_id: string;
+    url: string;
+    media_url: string;
+    preview_url?: string;
+    width: number;
+    height: number;
+    size?: number;
+    title?: string;
+    rating?: string;
+    tags?: string[];
+    source_url?: string;
+    extra_data?: Record<string, any>;
+  };
   created_at: Date;
   updated_at: Date;
+
+  // Instance methods
+  markAsRead(userId: string): Promise<IMessage>;
+  addReaction(userId: string, reactionType: "heart" | "like" | "sad" | "angry" | "laugh" | "wow" | "dislike"): Promise<IMessage>;
+  removeReaction(userId: string): Promise<IMessage>;
+  deleteForUser(userId: string, deleteType: "both" | "only_me"): Promise<IMessage>;
+  isDeletedForUser(userId: string): boolean;
+  getDeleteTypeForUser(userId: string): "both" | "only_me" | null;
+  getReactionByUser(userId: string): any;
+  getReactionCounts(): Record<string, number>;
+  recallMessage(userId: string): Promise<IMessage>;
+  getMediaUrl(): string | null;
+  getPreviewUrl(): string | null;
+  getProviderInfo(): { provider: string; provider_id: string; url: string } | null;
 }
 
-const MessageSchema = new Schema<IMessage>({
+// ✨ NEW: Interface for Message Model with static methods
+export interface IMessageModel extends Model<IMessage> {
+  getConversationMessages(
+    conversationId: string,
+    userId: string,
+    page?: number,
+    limit?: number
+  ): Promise<IMessage[]>;
+  
+  getDeletedMessagesForUser(userId: string): Promise<IMessage[]>;
+  
+  getRecalledMessages(conversationId?: string): Promise<IMessage[]>;
+  
+  // ✨ NEW: Static methods for rich media
+  getPopularRichMedia(
+    conversationId: string,
+    type: "gif" | "sticker",
+    provider?: string,
+    limit?: number
+  ): Promise<any[]>;
+  
+  getRichMediaStats(
+    conversationId?: string,
+    type?: "gif" | "sticker"
+  ): Promise<any[]>;
+}
+
+const MessageSchema = new Schema<IMessage, IMessageModel>({
   conversation: {
     type: Schema.Types.ObjectId,
     ref: "Conversation",
     required: true,
   },
   sender: { type: Schema.Types.ObjectId, ref: "User", required: true },
-  content: { type: String }, // ✨ Optional - không bắt buộc với E2EE
-  encrypted_content: { type: String }, // ✨ Encrypted content cho E2EE
+  content: { type: String },
+  encrypted_content: { type: String },
   encryption_metadata: {
     type: {
       type: String,
@@ -74,6 +132,8 @@ const MessageSchema = new Schema<IMessage>({
       "voice_note",
       "location",
       "call_log",
+      "gif",
+      "sticker",
     ],
     default: "text",
   },
@@ -110,6 +170,21 @@ const MessageSchema = new Schema<IMessage>({
     },
   ],
   metadata: { type: Schema.Types.Mixed },
+  rich_media: {
+    provider: { type: String, required: false },
+    provider_id: { type: String, required: false },
+    url: { type: String, required: false },
+    media_url: { type: String, required: false },
+    preview_url: { type: String, required: false },
+    width: { type: Number, required: false },
+    height: { type: Number, required: false },
+    size: { type: Number, required: false },
+    title: { type: String, required: false },
+    rating: { type: String, required: false },
+    tags: [{ type: String }],
+    source_url: { type: String, required: false },
+    extra_data: { type: Schema.Types.Mixed },
+  },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
 });
@@ -120,14 +195,15 @@ MessageSchema.index({ sender: 1 });
 MessageSchema.index({ type: 1 });
 MessageSchema.index({ conversation: 1, "deleted_by.user": 1, created_at: -1 });
 MessageSchema.index({ "deleted_by.delete_type": 1 });
+MessageSchema.index({ "rich_media.provider": 1 });
+MessageSchema.index({ "rich_media.provider_id": 1 });
+MessageSchema.index({ conversation: 1, type: 1 });
 
-// ✨ FIXED VALIDATION - Support E2EE
+// Pre-save middleware
 MessageSchema.pre("save", function (next) {
   this.updated_at = new Date();
 
-  // ✨ Validate message content based on type - SUPPORT E2EE
   if (this.type === "text") {
-    // Text messages: Phải có HOẶC encrypted_content HOẶC content HOẶC attachments
     if (!this.encrypted_content && !this.content && this.attachments.length === 0) {
       return next(
         new Error("Text messages must have encrypted_content, content, or attachments")
@@ -135,8 +211,15 @@ MessageSchema.pre("save", function (next) {
     }
   }
 
-  if (this.type !== "text" && this.type !== "call_log") {
-    // Non-text messages: Phải có attachments hoặc metadata
+  if (this.type === "gif" || this.type === "sticker") {
+    if (!this.rich_media || !this.rich_media.provider || !this.rich_media.media_url) {
+      return next(
+        new Error(`${this.type} messages must have valid rich_media with provider and media_url`)
+      );
+    }
+  }
+
+  if (this.type !== "text" && this.type !== "call_log" && this.type !== "gif" && this.type !== "sticker") {
     if (this.attachments.length === 0 && !this.metadata) {
       return next(
         new Error("Non-text messages must have attachments or metadata")
@@ -144,15 +227,12 @@ MessageSchema.pre("save", function (next) {
     }
   }
 
-  // Set edited timestamp - CHỈ khi content thay đổi (không check encrypted_content)
   if (this.isModified("content") && !this.isNew) {
     this.is_edited = true;
     this.edited_at = new Date();
   }
 
-  // Validation for deleted_by array
   if (this.isModified("deleted_by")) {
-    // Ensure no duplicate users in deleted_by
     const userIds = this.deleted_by.map((d: any) => d.user.toString());
     const uniqueUserIds = [...new Set(userIds)];
     if (userIds.length !== uniqueUserIds.length) {
@@ -180,14 +260,12 @@ MessageSchema.methods.markAsRead = function (userId: string) {
 
 MessageSchema.methods.addReaction = function (
   userId: string,
-  reactionType: "heart" | "like" | "sad" | "angry" | "laugh" | "wow"
+  reactionType: "heart" | "like" | "sad" | "angry" | "laugh" | "wow" | "dislike"
 ) {
-  // Remove existing reaction from this user first
   this.reactions = this.reactions.filter(
     (r: any) => r.user.toString() !== userId
   );
 
-  // Add new reaction
   this.reactions.push({
     user: new mongoose.Types.ObjectId(userId),
     type: reactionType,
@@ -208,12 +286,10 @@ MessageSchema.methods.deleteForUser = function (
   userId: string,
   deleteType: "both" | "only_me"
 ) {
-  // Remove existing deletion record for this user
   this.deleted_by = this.deleted_by.filter(
     (d: any) => d.user.toString() !== userId
   );
 
-  // Add new deletion record
   this.deleted_by.push({
     user: new mongoose.Types.ObjectId(userId),
     deleted_at: new Date(),
@@ -247,12 +323,10 @@ MessageSchema.methods.getReactionCounts = function () {
 };
 
 MessageSchema.methods.recallMessage = function (userId: string) {
-  // Only sender can recall message
   if (this.sender.toString() !== userId) {
     throw new Error("Only sender can recall message");
   }
 
-  // Add recall record (both = thu hồi)
   this.deleted_by = this.deleted_by.filter(
     (d: any) => d.user.toString() !== userId
   );
@@ -264,6 +338,31 @@ MessageSchema.methods.recallMessage = function (userId: string) {
   });
 
   return this.save();
+};
+
+MessageSchema.methods.getMediaUrl = function () {
+  if ((this.type === "gif" || this.type === "sticker") && this.rich_media) {
+    return this.rich_media.media_url;
+  }
+  return null;
+};
+
+MessageSchema.methods.getPreviewUrl = function () {
+  if ((this.type === "gif" || this.type === "sticker") && this.rich_media) {
+    return this.rich_media.preview_url || this.rich_media.media_url;
+  }
+  return null;
+};
+
+MessageSchema.methods.getProviderInfo = function () {
+  if ((this.type === "gif" || this.type === "sticker") && this.rich_media) {
+    return {
+      provider: this.rich_media.provider,
+      provider_id: this.rich_media.provider_id,
+      url: this.rich_media.url,
+    };
+  }
+  return null;
 };
 
 // Static methods
@@ -278,9 +377,7 @@ MessageSchema.statics.getConversationMessages = function (
   return this.find({
     conversation: conversationId,
     $or: [
-      // Tin nhắn chưa bị xóa
       { "deleted_by.user": { $ne: new mongoose.Types.ObjectId(userId) } },
-      // Hoặc tin nhắn bị xóa "only_me" (không phải "both")
       {
         deleted_by: {
           $elemMatch: {
@@ -325,6 +422,75 @@ MessageSchema.statics.getRecalledMessages = function (conversationId?: string) {
     .sort({ "deleted_by.deleted_at": -1 });
 };
 
-const Message = models.Message || model("Message", MessageSchema);
+// ✨ NEW: Static methods for rich media
+MessageSchema.statics.getPopularRichMedia = function (
+  conversationId: string,
+  type: "gif" | "sticker",
+  provider?: string,
+  limit: number = 10
+) {
+  const matchQuery: any = {
+    conversation: new mongoose.Types.ObjectId(conversationId),
+    type: type,
+    "rich_media.provider_id": { $exists: true },
+  };
+
+  if (provider) {
+    matchQuery["rich_media.provider"] = provider;
+  }
+
+  return this.aggregate([
+    { $match: matchQuery },
+    {
+      $group: {
+        _id: {
+          provider: "$rich_media.provider",
+          provider_id: "$rich_media.provider_id",
+        },
+        count: { $sum: 1 },
+        lastUsed: { $max: "$created_at" },
+        richMedia: { $first: "$rich_media" },
+      },
+    },
+    { $sort: { count: -1, lastUsed: -1 } },
+    { $limit: limit },
+  ]);
+};
+
+MessageSchema.statics.getRichMediaStats = function (
+  conversationId?: string,
+  type?: "gif" | "sticker"
+) {
+  const matchQuery: any = {
+    $or: [{ type: "gif" }, { type: "sticker" }],
+    "rich_media.provider": { $exists: true },
+  };
+
+  if (conversationId) {
+    matchQuery.conversation = new mongoose.Types.ObjectId(conversationId);
+  }
+
+  if (type) {
+    matchQuery.type = type;
+  }
+
+  return this.aggregate([
+    { $match: matchQuery },
+    {
+      $group: {
+        _id: {
+          provider: "$rich_media.provider",
+          type: "$type",
+        },
+        count: { $sum: 1 },
+        lastUsed: { $max: "$created_at" },
+      },
+    },
+    { $sort: { count: -1 } },
+  ]);
+};
+
+// ✨ UPDATED: Export with proper typing
+const Message = (models.Message || model<IMessage, IMessageModel>("Message", MessageSchema)) as IMessageModel;
 
 export default Message;
