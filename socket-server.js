@@ -17,6 +17,28 @@ console.log("🚀 Starting Socket Server with AI Emotion Features...");
 export let io;
 export let onlineUsers = [];
 
+// ✨ NEW: Debounce map to prevent rapid online status updates
+const userUpdateDebounce = new Map();
+const DEBOUNCE_DELAY = 2000; // 2 seconds
+
+// ✨ NEW: Helper to emit online users with debounce
+function emitOnlineUsersDebounced() {
+  // Clear existing timeout
+  if (userUpdateDebounce.has('global')) {
+    clearTimeout(userUpdateDebounce.get('global'));
+  }
+
+  // Set new timeout
+  const timeoutId = setTimeout(() => {
+    global.onlineUsers = onlineUsers;
+    io.emit("getUsers", onlineUsers);
+    console.log("👥 Online users broadcasted:", onlineUsers.length);
+    userUpdateDebounce.delete('global');
+  }, 500); // Shorter delay for better UX
+
+  userUpdateDebounce.set('global', timeoutId);
+}
+
 app
   .prepare()
   .then(() => {
@@ -49,6 +71,9 @@ app
         ],
         credentials: true,
       },
+      // ✨ NEW: Add ping/pong settings to keep connection alive
+      pingInterval: 25000,
+      pingTimeout: 60000,
     });
 
     global.io = io;
@@ -60,37 +85,64 @@ app
       console.log(`🔌 New socket connection: ${socket.id}`);
 
       // ==========================================
-      // USER CONNECTION
+      // USER CONNECTION - IMPROVED
       // ==========================================
       socket.on("addNewUsers", (clerkUser) => {
         if (clerkUser) {
           const user_id = clerkUser._id;
 
+          // ✨ Join personal room
           socket.join(`user:${user_id}`);
           console.log(
             `👤 User ${user_id} joined personal room: user:${user_id}`
           );
 
+          // ✨ IMPROVED: Update or add user
           const existingUserIndex = onlineUsers.findIndex(
             (user) => user.userId === user_id
           );
 
           if (existingUserIndex !== -1) {
+            // Update existing user's socket
+            const oldSocketId = onlineUsers[existingUserIndex].socketId;
             onlineUsers[existingUserIndex].socketId = socket.id;
+            onlineUsers[existingUserIndex].profile = clerkUser;
+            onlineUsers[existingUserIndex].lastActive = Date.now();
+            
+            console.log(`🔄 User ${user_id} socket updated: ${oldSocketId} → ${socket.id}`);
           } else {
+            // Add new user
             onlineUsers.push({
               userId: user_id,
               socketId: socket.id,
               profile: clerkUser,
+              lastActive: Date.now(),
             });
+            console.log(`➕ User ${user_id} added to online users`);
           }
 
           console.log(`👤 User ${user_id} connected with socket ${socket.id}`);
           console.log("📊 Total online users:", onlineUsers.length);
-        }
 
-        global.onlineUsers = onlineUsers;
-        io.emit("getUsers", onlineUsers);
+          // ✨ Emit with debounce to prevent rapid updates
+          emitOnlineUsersDebounced();
+        }
+      });
+
+      // ✨ NEW: Handle explicit user status updates
+      socket.on("updateUserStatus", (data) => {
+        const { user_id, status } = data;
+        
+        const userIndex = onlineUsers.findIndex(u => u.userId === user_id);
+        if (userIndex !== -1) {
+          onlineUsers[userIndex].lastActive = Date.now();
+          
+          if (status === 'online') {
+            console.log(`🟢 User ${user_id} status: online`);
+          }
+          
+          emitOnlineUsersDebounced();
+        }
       });
 
       // ==========================================
@@ -141,12 +193,12 @@ app
       socket.on("userTyping", async (data) => {
         try {
           const { conversation_id, user_id, user_name, is_typing } = data;
-          console.log(`⌨️ User typing event:`, {
-            conversation_id,
-            user_id,
-            user_name,
-            is_typing,
-          });
+          
+          // ✨ Update user's last active time
+          const userIndex = onlineUsers.findIndex(u => u.userId === user_id);
+          if (userIndex !== -1) {
+            onlineUsers[userIndex].lastActive = Date.now();
+          }
 
           const roomName = `conversation:${conversation_id}`;
           socket.to(roomName).emit("userTyping", {
@@ -156,8 +208,6 @@ app
             is_typing,
             timestamp: new Date(),
           });
-
-          console.log(`✅ Typing event broadcasted to room ${roomName}`);
         } catch (error) {
           console.error(`❌ Error handling userTyping:`, error);
         }
@@ -230,13 +280,11 @@ app
           const { user_id, message, conversation_id, include_emotion } = data;
           console.log(`🤖 AI Chat message from user ${user_id}:`, message);
 
-          // Emit typing indicator
           socket.emit("aiTyping", {
             conversation_id,
             is_typing: true,
           });
 
-          // Acknowledge receipt
           io.to(`user:${user_id}`).emit("aiChatMessageReceived", {
             conversation_id,
             user_message: message,
@@ -254,7 +302,6 @@ app
         }
       });
 
-      // AI Response Ready
       socket.on("aiResponseReady", async (data) => {
         try {
           const {
@@ -286,15 +333,13 @@ app
       });
 
       // ==========================================
-      // 🆕 EMOTION ANALYSIS EVENTS - ALL EMOTIONS
+      // EMOTION ANALYSIS & RECOMMENDATIONS
       // ==========================================
       socket.on("emotionAnalysisComplete", async (data) => {
         try {
           const { user_id, message_id, emotion_data, is_sender, context } = data;
           console.log(`😊 Emotion analysis complete for message ${message_id}`);
-          console.log(`   Emotion: ${emotion_data.dominant_emotion} (${(emotion_data.confidence_score * 100).toFixed(0)}%)`);
 
-          // Send to user's personal room
           io.to(`user:${user_id}`).emit("emotionAnalyzed", {
             message_id,
             is_sender,
@@ -311,41 +356,27 @@ app
         }
       });
 
-      // ==========================================
-      // 🆕 AI RECOMMENDATIONS - FOR ALL EMOTIONS
-      // ==========================================
       socket.on("requestEmotionRecommendations", async (data) => {
         try {
           const { user_id, emotion, confidence } = data;
-          console.log(`💡 Recommendations requested by user ${user_id} for emotion: ${emotion}`);
+          console.log(`💡 Recommendations requested by user ${user_id}`);
 
-          // Emit processing status
           socket.emit("recommendationsProcessing", {
             user_id,
             emotion,
             status: "generating_ai_recommendations",
             timestamp: new Date(),
           });
-
-          console.log(
-            `✅ Recommendations request acknowledged for user ${user_id}`
-          );
         } catch (error) {
-          console.error(
-            `❌ Error handling requestEmotionRecommendations:`,
-            error
-          );
+          console.error(`❌ Error handling requestEmotionRecommendations:`, error);
         }
       });
 
-      // Send AI-generated recommendations
       socket.on("sendRecommendations", async (data) => {
         try {
           const { user_id, emotion, recommendations, based_on } = data;
           console.log(`💡 Sending AI recommendations to user ${user_id}`);
-          console.log(`   Emotion: ${emotion}, Count: ${recommendations.length}`);
 
-          // Send to user's personal room
           io.to(`user:${user_id}`).emit("emotionRecommendations", {
             emotion,
             recommendations,
@@ -363,7 +394,6 @@ app
         }
       });
 
-      // Emotion Trends Update
       socket.on("emotionTrendsUpdate", async (data) => {
         try {
           const { user_id, trends, summary } = data;
@@ -374,23 +404,16 @@ app
             summary,
             timestamp: new Date(),
           });
-
-          console.log(`✅ Emotion trends delivered to user ${user_id}`);
         } catch (error) {
           console.error(`❌ Error handling emotionTrendsUpdate:`, error);
         }
       });
 
-      // ==========================================
-      // 🆕 BULK EMOTION NOTIFICATION (for group chats)
-      // ==========================================
       socket.on("bulkEmotionAnalysis", async (data) => {
         try {
           const { message_id, conversation_id, participants_data } = data;
           console.log(`📊 Bulk emotion analysis for message ${message_id}`);
-          console.log(`   Participants: ${participants_data.length}`);
 
-          // Send emotion data to each participant
           participants_data.forEach((participantData) => {
             const { user_id, emotion, confidence, recommendations, is_sender } = participantData;
             
@@ -398,15 +421,10 @@ app
               message_id,
               conversation_id,
               is_sender,
-              emotion_data: {
-                emotion,
-                confidence,
-              },
+              emotion_data: { emotion, confidence },
               recommendations: recommendations || [],
               timestamp: new Date(),
             });
-
-            console.log(`   ✅ Sent to ${user_id}: ${emotion} (${(confidence * 100).toFixed(0)}%)`);
           });
 
           console.log(`✅ Bulk emotion analysis completed`);
@@ -434,7 +452,7 @@ app
       });
 
       // ==========================================
-      // DISCONNECT
+      // DISCONNECT - IMPROVED WITH GRACE PERIOD
       // ==========================================
       socket.on("disconnect", () => {
         console.log(`🔌 Socket disconnected: ${socket.id}`);
@@ -442,18 +460,38 @@ app
         const disconnectedUser = onlineUsers.find(
           (user) => user.socketId === socket.id
         );
+        
         if (disconnectedUser) {
-          onlineUsers = onlineUsers.filter(
-            (user) => user.socketId !== socket.id
-          );
-          console.log(`👤 User ${disconnectedUser.userId} disconnected`);
+          const user_id = disconnectedUser.userId;
+          
+          // ✨ IMPROVED: Grace period before removing (for screen transitions)
+          setTimeout(() => {
+            // Check if user reconnected with a different socket
+            const currentUser = onlineUsers.find(u => u.userId === user_id);
+            
+            if (currentUser && currentUser.socketId === socket.id) {
+              // User didn't reconnect, remove them
+              onlineUsers = onlineUsers.filter(
+                (user) => user.socketId !== socket.id
+              );
+              console.log(`👋 User ${user_id} removed from online users`);
+              
+              global.onlineUsers = onlineUsers;
+              emitOnlineUsersDebounced();
+            } else {
+              console.log(`✅ User ${user_id} reconnected, keeping online status`);
+            }
+          }, DEBOUNCE_DELAY); // 2 second grace period
         }
-
-        global.onlineUsers = onlineUsers;
-        io.emit("getUsers", onlineUsers);
       });
 
       console.log("🤖 AI Emotion & Recommendation events registered");
+    });
+
+    // ✨ NEW: Cleanup stale debounce timeouts on shutdown
+    process.on('SIGTERM', () => {
+      userUpdateDebounce.forEach(timeout => clearTimeout(timeout));
+      userUpdateDebounce.clear();
     });
 
     // Next.js handler
@@ -465,9 +503,8 @@ app
     httpServer.listen(port, () => {
       console.log(`🚀 Server ready on http://${hostname}:${port}`);
       console.log(`📡 Socket.IO server running`);
-      console.log(`✅ Global io instance available`);
+      console.log(`✅ Online status debouncing enabled (${DEBOUNCE_DELAY}ms grace period)`);
       console.log(`🤖 AI Emotion Analysis: Enabled for ALL emotions`);
-      console.log(`💡 AI Recommendations: Powered by HuggingFace`);
     });
   })
   .catch((err) => {

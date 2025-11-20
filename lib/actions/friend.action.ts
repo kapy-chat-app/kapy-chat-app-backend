@@ -21,8 +21,11 @@ import {
 import { connectToDatabase } from "../mongoose";
 import User from "@/database/user.model";
 import { StringExpression } from "mongoose";
+import { emitToUserRoom } from "../socket.helper";  // ✅ ĐỔI IMPORT
 
-// Tìm kiếm người dùng
+// ============================================
+// TÌM KIẾM NGƯỜI DÙNG
+// ============================================
 export async function searchUsers(
   clerkId: string,
   params: SearchUserDto
@@ -51,7 +54,7 @@ export async function searchUsers(
 
     const users = await User.find(searchQuery)
       .select("username full_name avatar bio is_online")
-      .populate('avatar', 'url') // Populate avatar để lấy URL
+      .populate("avatar", "url")
       .limit(limit)
       .lean();
 
@@ -126,7 +129,7 @@ export async function searchUsers(
           id: (user._id as string).toString(),
           username: user.username,
           full_name: user.full_name,
-          avatar: user.avatar?.url || null, // Lấy URL từ populated avatar
+          avatar: user.avatar?.url || null,
           bio: user.bio,
           is_online: user.is_online,
           mutualFriendsCount,
@@ -142,7 +145,9 @@ export async function searchUsers(
   }
 }
 
-// Gửi lời mời kết bạn
+// ============================================
+// GỬI LỜI MỜI KẾT BẠN (với Socket Events)
+// ============================================
 export async function sendFriendRequest(
   clerkId: string,
   params: SendFriendRequestDto
@@ -154,10 +159,16 @@ export async function sendFriendRequest(
 
     const { recipientId } = params;
 
-    const currentUserData = await User.findOne({ clerkId });
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!currentUserData) throw new Error("User not found");
 
-    const recipient = await User.findById(recipientId);
+    const recipient = await User.findById(recipientId).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!recipient) throw new Error("Recipient not found");
 
     if (currentUserData._id.toString() === recipientId) {
@@ -185,11 +196,63 @@ export async function sendFriendRequest(
     }
 
     // Create new friendship request
-    await Friendship.create({
-      requester: currentUserData._id,
+    const friendship = await Friendship.findOneAndUpdate(
+      {
+        $or: [
+          { requester: currentUserData._id, recipient: recipientId },
+          { requester: recipientId, recipient: currentUserData._id },
+        ],
+      },
+      {
+        requester: currentUserData._id,
+        recipient: recipientId,
+        status: "pending",
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+      }
+    );
+
+    // ===== SOCKET EVENTS =====
+    // Emit to recipient - friend request received
+    await emitToUserRoom(
+      "friendRequestReceived",
+      recipient.clerkId,
+      {
+        request_id: friendship._id.toString(),
+        requester_id: currentUserData.clerkId,
+        requester_name: currentUserData.full_name,
+        requester_avatar: currentUserData.avatar?.url || null,
+      }
+    );
+
+    // Emit to requester - confirmation
+    await emitToUserRoom(
+      "friendRequestSent",
+      currentUserData.clerkId,
+      {
+        request_id: friendship._id.toString(),
+        recipient_id: recipient.clerkId,
+        recipient_name: recipient.full_name,
+        recipient_avatar: recipient.avatar?.url || null,
+      }
+    );
+
+    // Update friend request count for recipient
+    const recipientRequestCount = await Friendship.countDocuments({
       recipient: recipientId,
       status: "pending",
     });
+
+    await emitToUserRoom(
+      "friendRequestCountUpdated",
+      recipient.clerkId,
+      {
+        count: recipientRequestCount,
+      }
+    );
 
     return { success: true, message: "Friend request sent successfully" };
   } catch (error) {
@@ -198,7 +261,9 @@ export async function sendFriendRequest(
   }
 }
 
-// Phản hồi lời mời kết bạn
+// ============================================
+// PHẢN HỒI LỜI MỜI KẾT BẠN (với Socket Events)
+// ============================================
 export async function respondToFriendRequest(
   clerkId: string,
   params: RespondFriendRequestDto
@@ -210,7 +275,10 @@ export async function respondToFriendRequest(
 
     const { requestId, action } = params;
 
-    const currentUserData = await User.findOne({ clerkId });
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!currentUserData) throw new Error("User not found");
 
     const friendship = await Friendship.findById(requestId);
@@ -224,6 +292,15 @@ export async function respondToFriendRequest(
       throw new Error("Friend request is not pending");
     }
 
+    const requesterId = friendship.requester.toString();
+
+    // Get requester information
+    const requester = await User.findById(requesterId).populate({
+      path: "avatar",
+      select: "url",
+    });
+
+    // Update friendship status
     friendship.status =
       action === "accept"
         ? "accepted"
@@ -231,6 +308,104 @@ export async function respondToFriendRequest(
         ? "blocked"
         : "declined";
     await friendship.save();
+
+    // ===== SOCKET EVENTS =====
+    if (action === "accept") {
+      // Emit to requester - their request was accepted
+      await emitToUserRoom(
+        "friendRequestAccepted",
+        requester.clerkId,
+        {
+          request_id: requestId,
+          accepted_by: currentUserData.clerkId,
+          new_friend_id: currentUserData.clerkId,
+          new_friend_name: currentUserData.full_name,
+          new_friend_avatar: currentUserData.avatar?.url || null,
+        }
+      );
+
+      // Emit to recipient (current user) - confirmation
+      await emitToUserRoom(
+        "friendRequestAccepted",
+        currentUserData.clerkId,
+        {
+          request_id: requestId,
+          accepted_by: currentUserData.clerkId,
+          new_friend_id: requester.clerkId,
+          new_friend_name: requester.full_name,
+          new_friend_avatar: requester.avatar?.url || null,
+        }
+      );
+
+      // Update friend counts for both users
+      const requesterFriendCount = await Friendship.countDocuments({
+        $or: [
+          { requester: requesterId, status: "accepted" },
+          { recipient: requesterId, status: "accepted" },
+        ],
+      });
+
+      const recipientFriendCount = await Friendship.countDocuments({
+        $or: [
+          { requester: currentUserData._id, status: "accepted" },
+          { recipient: currentUserData._id, status: "accepted" },
+        ],
+      });
+
+      await emitToUserRoom(
+        "friendCountUpdated",
+        requester.clerkId,
+        {
+          count: requesterFriendCount,
+        }
+      );
+
+      await emitToUserRoom(
+        "friendCountUpdated",
+        currentUserData.clerkId,
+        {
+          count: recipientFriendCount,
+        }
+      );
+    } else if (action === "decline") {
+      // Emit to requester - their request was declined
+      await emitToUserRoom(
+        "friendRequestDeclined",
+        requester.clerkId,
+        {
+          request_id: requestId,
+          declined_by: currentUserData.clerkId,
+          declined_by_name: currentUserData.full_name,
+        }
+      );
+    }
+
+    // Update friend request counts for both users
+    const requesterRequestCount = await Friendship.countDocuments({
+      recipient: requesterId,
+      status: "pending",
+    });
+
+    const recipientRequestCount = await Friendship.countDocuments({
+      recipient: currentUserData._id,
+      status: "pending",
+    });
+
+    await emitToUserRoom(
+      "friendRequestCountUpdated",
+      requester.clerkId,
+      {
+        count: requesterRequestCount,
+      }
+    );
+
+    await emitToUserRoom(
+      "friendRequestCountUpdated",
+      currentUserData.clerkId,
+      {
+        count: recipientRequestCount,
+      }
+    );
 
     const messages = {
       accept: "Friend request accepted",
@@ -245,7 +420,9 @@ export async function respondToFriendRequest(
   }
 }
 
-// Lấy danh sách bạn bè
+// ============================================
+// LẤY DANH SÁCH BẠN BÈ
+// ============================================
 export async function getFriends(
   clerkId: string,
   params: GetFriendsDto
@@ -275,16 +452,16 @@ export async function getFriends(
         select: "id clerkId username full_name avatar is_online last_seen",
         populate: {
           path: "avatar",
-          select: "url"
-        }
+          select: "url",
+        },
       })
       .populate({
         path: "recipient",
         select: "id clerkId username full_name avatar is_online last_seen",
         populate: {
           path: "avatar",
-          select: "url"
-        }
+          select: "url",
+        },
       })
       .sort({ accepted_at: -1 })
       .skip(skip)
@@ -299,13 +476,13 @@ export async function getFriends(
 
       return {
         id: friend._id.toString(),
-        clerkId:friend.clerkId,
+        clerkId: friend.clerkId,
         username: friend.username,
         full_name: friend.full_name,
-        avatar: friend.avatar?.url || null, // Lấy URL từ populated avatar
+        avatar: friend.avatar?.url || null,
         is_online: friend.is_online,
         last_seen: friend.last_seen,
-        mutualFriendsCount: 0, // Will calculate if needed
+        mutualFriendsCount: 0,
         friendshipDate: friendship.accepted_at || friendship.created_at,
       };
     });
@@ -333,7 +510,9 @@ export async function getFriends(
   }
 }
 
-// Xem profile người dùng
+// ============================================
+// XEM PROFILE NGƯỜI DÙNG
+// ============================================
 export async function getUserProfile(
   clerkId: string,
   userId: string
@@ -346,12 +525,11 @@ export async function getUserProfile(
     const currentUserData = await User.findOne({ clerkId });
     if (!currentUserData) throw new Error("User not found");
 
-    // Populate avatar and cover_photo để lấy URL
-    const targetUser = await User.findById(userId)
-      .populate('avatar', 'url')
-      .populate('cover_photo', 'url')
-      .lean() as any; // Type cast để tránh TypeScript error
-    
+    const targetUser = (await User.findById(userId)
+      .populate("avatar", "url")
+      .populate("cover_photo", "url")
+      .lean()) as any;
+
     if (!targetUser) throw new Error("User not found");
 
     // Get friendship status
@@ -425,10 +603,8 @@ export async function getUserProfile(
       username: targetUser.username,
       full_name: targetUser.full_name,
       bio: canViewProfile ? targetUser.bio : undefined,
-      avatar: targetUser.avatar?.url || null, // Lấy URL từ populated avatar
-      cover_photo: canViewProfile
-        ? targetUser.cover_photo?.url || null // Lấy URL từ populated cover_photo
-        : undefined,
+      avatar: targetUser.avatar?.url || null,
+      cover_photo: canViewProfile ? targetUser.cover_photo?.url || null : undefined,
       location: canViewProfile ? targetUser.location : undefined,
       website: canViewProfile ? targetUser.website : undefined,
       is_online: targetUser.is_online,
@@ -445,7 +621,9 @@ export async function getUserProfile(
   }
 }
 
-// Đề xuất kết bạn
+// ============================================
+// ĐỀ XUẤT KẾT BẠN
+// ============================================
 export async function getFriendSuggestions(
   clerkId: string,
   limit = 10
@@ -536,10 +714,10 @@ export async function getFriendSuggestions(
         .lean();
 
       for (const user of locationSuggestions) {
-        const userId = (user._id as StringExpression).toString();
-        if (!suggestions.has(userId)) {
-          suggestions.set(userId, {
-            id: userId,
+        const odUserId = (user._id as StringExpression).toString();
+        if (!suggestions.has(odUserId)) {
+          suggestions.set(odUserId, {
+            id: odUserId,
             username: user.username,
             full_name: user.full_name,
             avatar: user.avatar?.toString(),
@@ -564,7 +742,9 @@ export async function getFriendSuggestions(
   }
 }
 
-// Chặn người dùng
+// ============================================
+// CHẶN NGƯỜI DÙNG (với Socket Events)
+// ============================================
 export async function blockUser(
   clerkId: string,
   params: BlockUserDto
@@ -576,10 +756,16 @@ export async function blockUser(
 
     const { userId, reason } = params;
 
-    const currentUserData = await User.findOne({ clerkId });
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!currentUserData) throw new Error("User not found");
 
-    const targetUser = await User.findById(userId);
+    const targetUser = await User.findById(userId).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!targetUser) throw new Error("User to block not found");
 
     if (currentUserData._id.toString() === userId) {
@@ -617,6 +803,48 @@ export async function blockUser(
       });
     }
 
+    // ===== SOCKET EVENTS =====
+    // Emit to blocker (current user)
+    await emitToUserRoom(
+      "friendBlocked",
+      currentUserData.clerkId,
+      {
+        blocked_user_id: targetUser.clerkId,
+        blocked_user_name: targetUser.full_name,
+      }
+    );
+
+    // Update friend counts for both users
+    const blockerFriendCount = await Friendship.countDocuments({
+      $or: [
+        { requester: currentUserData._id, status: "accepted" },
+        { recipient: currentUserData._id, status: "accepted" },
+      ],
+    });
+
+    const blockedFriendCount = await Friendship.countDocuments({
+      $or: [
+        { requester: userId, status: "accepted" },
+        { recipient: userId, status: "accepted" },
+      ],
+    });
+
+    await emitToUserRoom(
+      "friendCountUpdated",
+      currentUserData.clerkId,
+      {
+        count: blockerFriendCount,
+      }
+    );
+
+    await emitToUserRoom(
+      "friendCountUpdated",
+      targetUser.clerkId,
+      {
+        count: blockedFriendCount,
+      }
+    );
+
     return { success: true, message: "User blocked successfully" };
   } catch (error) {
     console.error("Error blocking user:", error);
@@ -624,7 +852,9 @@ export async function blockUser(
   }
 }
 
-// Bỏ chặn người dùng
+// ============================================
+// BỎ CHẶN NGƯỜI DÙNG (với Socket Events)
+// ============================================
 export async function unblockUser(
   clerkId: string,
   params: UnblockUserDto
@@ -636,8 +866,16 @@ export async function unblockUser(
 
     const { userId } = params;
 
-    const currentUserData = await User.findOne({ clerkId });
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
     if (!currentUserData) throw new Error("User not found");
+
+    const targetUser = await User.findById(userId).populate({
+      path: "avatar",
+      select: "url",
+    });
 
     // Find the blocked relationship where current user is the blocker
     const blockedRelationship = await Friendship.findOne({
@@ -653,6 +891,17 @@ export async function unblockUser(
     // Remove the blocked relationship entirely
     await Friendship.findByIdAndDelete(blockedRelationship._id);
 
+    // ===== SOCKET EVENTS =====
+    // Emit to unblocker (current user)
+    await emitToUserRoom(
+      "friendUnblocked",
+      currentUserData.clerkId,
+      {
+        unblocked_user_id: targetUser?.clerkId,
+        unblocked_user_name: targetUser?.full_name,
+      }
+    );
+
     return { success: true, message: "User unblocked successfully" };
   } catch (error) {
     console.error("Error unblocking user:", error);
@@ -660,7 +909,9 @@ export async function unblockUser(
   }
 }
 
-// Lấy danh sách người dùng đã chặn
+// ============================================
+// LẤY DANH SÁCH NGƯỜI DÙNG ĐÃ CHẶN
+// ============================================
 export async function getBlockedUsers(
   clerkId: string,
   params: GetBlockedUsersDto
@@ -688,8 +939,8 @@ export async function getBlockedUsers(
         select: "username full_name avatar",
         populate: {
           path: "avatar",
-          select: "url"
-        }
+          select: "url",
+        },
       })
       .sort({ updated_at: -1 })
       .skip(skip)
@@ -702,7 +953,7 @@ export async function getBlockedUsers(
       full_name: relationship.recipient.full_name,
       avatar: relationship.recipient.avatar?.url || null,
       blockedAt: relationship.updated_at,
-      reason: undefined, // You can add a reason field to the Friendship model if needed
+      reason: undefined,
     }));
 
     // Filter by search if provided
@@ -723,7 +974,9 @@ export async function getBlockedUsers(
   }
 }
 
-// Kiểm tra xem có bị chặn bởi user khác không
+// ============================================
+// KIỂM TRA XEM CÓ BỊ CHẶN BỞI USER KHÁC KHÔNG
+// ============================================
 export async function isBlockedByUser(
   clerkId: string,
   userId: string
@@ -750,7 +1003,9 @@ export async function isBlockedByUser(
   }
 }
 
-// Kiểm tra xem current user có chặn user khác không
+// ============================================
+// KIỂM TRA XEM CURRENT USER CÓ CHẶN USER KHÁC KHÔNG
+// ============================================
 export async function hasBlockedUser(
   clerkId: string,
   userId: string
@@ -777,79 +1032,35 @@ export async function hasBlockedUser(
   }
 }
 
+// ============================================
+// LẤY DANH SÁCH LỜI MỜI KẾT BẠN
+// ============================================
 export async function getFriendRequests(
   clerkId: string,
   params: GetFriendRequestsDto
-): Promise<{ requests: FriendRequestDto[]; totalCount: number }> {
+): Promise<{ 
+  requests: FriendRequestDto[]; 
+  sentRequests?: FriendRequestDto[];
+  totalCount: number 
+}> {
   try {
     if (!clerkId) throw new Error("Unauthorized");
 
     await connectToDatabase();
 
-    const { page = 1, limit = 20, type = 'received' } = params;
+    const { page = 1, limit = 20, type = "received" } = params;
     const skip = (page - 1) * limit;
 
     const currentUserData = await User.findOne({ clerkId });
     if (!currentUserData) throw new Error("User not found");
 
-    // Build query based on request type
-    let matchQuery: any = {};
-    
-    switch (type) {
-      case 'received':
-        // Requests sent TO current user (current user is recipient)
-        matchQuery = {
-          recipient: currentUserData._id,
-          status: 'pending'
-        };
-        break;
-      case 'sent':
-        // Requests sent BY current user (current user is requester)
-        matchQuery = {
-          requester: currentUserData._id,
-          status: 'pending'
-        };
-        break;
-      case 'all':
-        // All pending requests involving current user
-        matchQuery = {
-          $or: [
-            { recipient: currentUserData._id, status: 'pending' },
-            { requester: currentUserData._id, status: 'pending' }
-          ]
-        };
-        break;
-      default:
-        matchQuery = {
-          recipient: currentUserData._id,
-          status: 'pending'
-        };
-    }
+    let requests: FriendRequestDto[] = [];
+    let sentRequests: FriendRequestDto[] = [];
+    let totalCount = 0;
 
-    const friendRequests = await Friendship.find(matchQuery)
-      .populate({
-        path: 'requester',
-        select: 'username full_name avatar',
-        populate: {
-          path: 'avatar',
-          select: 'url'
-        }
-      })
-      .populate({
-        path: 'recipient', 
-        select: 'username full_name avatar',
-        populate: {
-          path: 'avatar',
-          select: 'url'
-        }
-      })
-      .sort({ created_at: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
-
-    const requests: FriendRequestDto[] = friendRequests.map((request) => ({
-      id: (request._id as StringConstructor).toString(),
+    // Helper function to map friendship to DTO
+    const mapToDto = (request: any): FriendRequestDto => ({
+      id: request._id.toString(),
       requester: {
         id: request.requester._id.toString(),
         username: request.requester.username,
@@ -865,13 +1076,332 @@ export async function getFriendRequests(
       status: request.status,
       created_at: request.created_at,
       updated_at: request.updated_at,
-    }));
+    });
 
-    const totalCount = await Friendship.countDocuments(matchQuery);
+    // Load RECEIVED requests
+    if (type === "received" || type === "all") {
+      const receivedQuery = {
+        recipient: currentUserData._id,
+        status: "pending",
+      };
+
+      const receivedRequests = await Friendship.find(receivedQuery)
+        .populate({
+          path: "requester",
+          select: "username full_name avatar",
+          populate: {
+            path: "avatar",
+            select: "url",
+          },
+        })
+        .populate({
+          path: "recipient",
+          select: "username full_name avatar",
+          populate: {
+            path: "avatar",
+            select: "url",
+          },
+        })
+        .sort({ created_at: -1 })
+        .skip(type === "received" ? skip : 0)
+        .limit(type === "received" ? limit : 100)
+        .lean();
+
+      requests = receivedRequests.map(mapToDto);
+
+      if (type === "received") {
+        totalCount = await Friendship.countDocuments(receivedQuery);
+      }
+    }
+
+    // Load SENT requests
+    if (type === "sent" || type === "all") {
+      const sentQuery = {
+        requester: currentUserData._id,
+        status: "pending",
+      };
+
+      const sentRequestsData = await Friendship.find(sentQuery)
+        .populate({
+          path: "requester",
+          select: "username full_name avatar",
+          populate: {
+            path: "avatar",
+            select: "url",
+          },
+        })
+        .populate({
+          path: "recipient",
+          select: "username full_name avatar",
+          populate: {
+            path: "avatar",
+            select: "url",
+          },
+        })
+        .sort({ created_at: -1 })
+        .skip(type === "sent" ? skip : 0)
+        .limit(type === "sent" ? limit : 100)
+        .lean();
+
+      sentRequests = sentRequestsData.map(mapToDto);
+
+      if (type === "sent") {
+        totalCount = await Friendship.countDocuments(sentQuery);
+        requests = sentRequests;
+        sentRequests = [];
+      }
+    }
+
+    // Return based on type
+    if (type === "all") {
+      return {
+        requests,
+        sentRequests,
+        totalCount: requests.length + sentRequests.length,
+      };
+    }
 
     return { requests, totalCount };
   } catch (error) {
     console.error("Error getting friend requests:", error);
     throw error;
+  }
+}
+
+// ============================================
+// HỦY LỜI MỜI KẾT BẠN (với Socket Events)
+// ============================================
+export async function cancelFriendRequest(
+  clerkId: string,
+  requestId: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    if (!clerkId) throw new Error("Unauthorized");
+
+    await connectToDatabase();
+
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
+    if (!currentUserData) throw new Error("User not found");
+
+    // Find and delete the friend request
+    const friendship = await Friendship.findById(requestId);
+
+    if (!friendship) {
+      throw new Error("Friend request not found");
+    }
+
+    // Verify current user is the requester
+    if (friendship.requester.toString() !== currentUserData._id.toString()) {
+      throw new Error("Not authorized to cancel this request");
+    }
+
+    const recipientId = friendship.recipient.toString();
+
+    // Get recipient information
+    const recipient = await User.findById(recipientId).populate({
+      path: "avatar",
+      select: "url",
+    });
+
+    // Delete the friendship request
+    await Friendship.findByIdAndDelete(requestId);
+
+    // ===== SOCKET EVENTS =====
+    // Emit to recipient - request was cancelled
+    await emitToUserRoom(
+      "friendRequestCancelled",
+      recipient.clerkId,
+      {
+        request_id: requestId,
+        cancelled_by: currentUserData.clerkId,
+        cancelled_by_name: currentUserData.full_name,
+      }
+    );
+
+    // Update friend request counts
+    const requesterRequestCount = await Friendship.countDocuments({
+      recipient: currentUserData._id,
+      status: "pending",
+    });
+
+    const recipientRequestCount = await Friendship.countDocuments({
+      recipient: recipientId,
+      status: "pending",
+    });
+
+    await emitToUserRoom(
+      "friendRequestCountUpdated",
+      currentUserData.clerkId,
+      {
+        count: requesterRequestCount,
+      }
+    );
+
+    await emitToUserRoom(
+      "friendRequestCountUpdated",
+      recipient.clerkId,
+      {
+        count: recipientRequestCount,
+      }
+    );
+
+    return { success: true, message: "Friend request cancelled" };
+  } catch (error) {
+    console.error("Error cancelling friend request:", error);
+    throw error;
+  }
+}
+
+// ============================================
+// XÓA BẠN BÈ (với Socket Events)
+// ============================================
+export async function removeFriend(
+  clerkId: string,
+  friendId: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    if (!clerkId) throw new Error("Unauthorized");
+
+    await connectToDatabase();
+
+    const currentUserData = await User.findOne({ clerkId }).populate({
+      path: "avatar",
+      select: "url",
+    });
+    if (!currentUserData) throw new Error("User not found");
+
+    const friendUser = await User.findById(friendId).populate({
+      path: "avatar",
+      select: "url",
+    });
+    if (!friendUser) throw new Error("Friend not found");
+
+    // Find and delete the friendship
+    const friendship = await Friendship.findOneAndDelete({
+      $or: [
+        { requester: currentUserData._id, recipient: friendId, status: "accepted" },
+        { requester: friendId, recipient: currentUserData._id, status: "accepted" },
+      ],
+    });
+
+    if (!friendship) {
+      throw new Error("Friendship not found");
+    }
+
+    // ===== SOCKET EVENTS =====
+    // Emit to removed friend
+    await emitToUserRoom(
+      "friendRemoved",
+      friendUser.clerkId,
+      {
+        removed_by: currentUserData.clerkId,
+        removed_by_name: currentUserData.full_name,
+      }
+    );
+
+    // Emit to remover (current user)
+    await emitToUserRoom(
+      "friendRemoved",
+      currentUserData.clerkId,
+      {
+        removed_user_id: friendUser.clerkId,
+        removed_user_name: friendUser.full_name,
+      }
+    );
+
+    // Update friend counts for both users
+    const removerFriendCount = await Friendship.countDocuments({
+      $or: [
+        { requester: currentUserData._id, status: "accepted" },
+        { recipient: currentUserData._id, status: "accepted" },
+      ],
+    });
+
+    const removedFriendCount = await Friendship.countDocuments({
+      $or: [
+        { requester: friendId, status: "accepted" },
+        { recipient: friendId, status: "accepted" },
+      ],
+    });
+
+    await emitToUserRoom(
+      "friendCountUpdated",
+      currentUserData.clerkId,
+      {
+        count: removerFriendCount,
+      }
+    );
+
+    await emitToUserRoom(
+      "friendCountUpdated",
+      friendUser.clerkId,
+      {
+        count: removedFriendCount,
+      }
+    );
+
+    return { success: true, message: "Friend removed successfully" };
+  } catch (error) {
+    console.error("Error removing friend:", error);
+    throw error;
+  }
+}
+
+// ============================================
+// THÔNG BÁO TRẠNG THÁI ONLINE/OFFLINE (với Socket Events)
+// ============================================
+export async function notifyFriendStatusChange(
+  clerkId: string,
+  status: "online" | "offline"
+): Promise<{ success: boolean }> {
+  try {
+    if (!clerkId) throw new Error("Unauthorized");
+
+    await connectToDatabase();
+
+    const currentUserData = await User.findOne({ clerkId });
+    if (!currentUserData) throw new Error("User not found");
+
+    // Get user's friends
+    const friendships = await Friendship.find({
+      $or: [
+        { requester: currentUserData._id, status: "accepted" },
+        { recipient: currentUserData._id, status: "accepted" },
+      ],
+    })
+      .populate({
+        path: "requester",
+        select: "clerkId",
+      })
+      .populate({
+        path: "recipient",
+        select: "clerkId",
+      });
+
+    // Emit status change to all friends
+    for (const friendship of friendships) {
+      const friendClerkId =
+        (friendship as any).requester._id.toString() ===
+        currentUserData._id.toString()
+          ? (friendship as any).recipient.clerkId
+          : (friendship as any).requester.clerkId;
+
+      await emitToUserRoom(
+        "friendStatusChanged",
+        friendClerkId,
+        {
+          friend_id: currentUserData.clerkId,
+          status,
+        }
+      );
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error notifying friend status change:", error);
+    return { success: false };
   }
 }
