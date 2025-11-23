@@ -1,4 +1,4 @@
-// src/database/models/message.model.ts (UPDATE)
+// src/database/models/message.model.ts - UPDATED
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import mongoose, { Document, Model, model, models, Schema } from "mongoose";
 
@@ -42,7 +42,22 @@ export interface IMessage extends Document {
     user: mongoose.Types.ObjectId;
     read_at: Date;
   }[];
-  metadata?: any;
+  // ✨ UPDATED: Proper typing for metadata
+  metadata?: {
+    isSystemMessage?: boolean;
+    action?: 
+      | "create_group"
+      | "add_participants"
+      | "remove_participant"
+      | "leave_group"
+      | "transfer_admin"
+      | "auto_transfer_admin"
+      | "update_group_name"
+      | "update_group_description"
+      | "update_group_avatar"
+      | string;
+    [key: string]: any;
+  };
   rich_media?: {
     provider: "giphy" | "tenor" | "custom" | string;
     provider_id: string;
@@ -74,6 +89,8 @@ export interface IMessage extends Document {
   getMediaUrl(): string | null;
   getPreviewUrl(): string | null;
   getProviderInfo(): { provider: string; provider_id: string; url: string } | null;
+  // ✨ NEW: Check if message is system message
+  isSystemMessage(): boolean;
 }
 
 // ✨ NEW: Interface for Message Model with static methods
@@ -89,7 +106,6 @@ export interface IMessageModel extends Model<IMessage> {
   
   getRecalledMessages(conversationId?: string): Promise<IMessage[]>;
   
-  // ✨ NEW: Static methods for rich media
   getPopularRichMedia(
     conversationId: string,
     type: "gif" | "sticker",
@@ -101,6 +117,15 @@ export interface IMessageModel extends Model<IMessage> {
     conversationId?: string,
     type?: "gif" | "sticker"
   ): Promise<any[]>;
+  
+  // ✨ NEW: Create system message helper
+  createSystemMessage(
+    conversationId: string,
+    senderId: string,
+    content: string,
+    action: string,
+    additionalMetadata?: Record<string, any>
+  ): Promise<IMessage>;
 }
 
 const MessageSchema = new Schema<IMessage, IMessageModel>({
@@ -169,7 +194,11 @@ const MessageSchema = new Schema<IMessage, IMessageModel>({
       read_at: { type: Date, default: Date.now },
     },
   ],
-  metadata: { type: Schema.Types.Mixed },
+  // ✨ UPDATED: Better structure for metadata
+  metadata: {
+    type: Schema.Types.Mixed,
+    default: {},
+  },
   rich_media: {
     provider: { type: String, required: false },
     provider_id: { type: String, required: false },
@@ -198,16 +227,22 @@ MessageSchema.index({ "deleted_by.delete_type": 1 });
 MessageSchema.index({ "rich_media.provider": 1 });
 MessageSchema.index({ "rich_media.provider_id": 1 });
 MessageSchema.index({ conversation: 1, type: 1 });
+// ✨ NEW: Index for system messages
+MessageSchema.index({ "metadata.isSystemMessage": 1 });
+MessageSchema.index({ "metadata.action": 1 });
 
 // Pre-save middleware
 MessageSchema.pre("save", function (next) {
   this.updated_at = new Date();
 
   if (this.type === "text") {
-    if (!this.encrypted_content && !this.content && this.attachments.length === 0) {
-      return next(
-        new Error("Text messages must have encrypted_content, content, or attachments")
-      );
+    // ✅ UPDATED: System messages don't need content validation
+    if (!this.metadata?.isSystemMessage) {
+      if (!this.encrypted_content && !this.content && this.attachments.length === 0) {
+        return next(
+          new Error("Text messages must have encrypted_content, content, or attachments")
+        );
+      }
     }
   }
 
@@ -365,6 +400,11 @@ MessageSchema.methods.getProviderInfo = function () {
   return null;
 };
 
+// ✨ NEW: Check if message is system message
+MessageSchema.methods.isSystemMessage = function () {
+  return this.metadata?.isSystemMessage === true;
+};
+
 // Static methods
 MessageSchema.statics.getConversationMessages = function (
   conversationId: string,
@@ -422,7 +462,6 @@ MessageSchema.statics.getRecalledMessages = function (conversationId?: string) {
     .sort({ "deleted_by.deleted_at": -1 });
 };
 
-// ✨ NEW: Static methods for rich media
 MessageSchema.statics.getPopularRichMedia = function (
   conversationId: string,
   type: "gif" | "sticker",
@@ -490,7 +529,29 @@ MessageSchema.statics.getRichMediaStats = function (
   ]);
 };
 
-// ✨ UPDATED: Export with proper typing
+// ✨ NEW: Helper to create system messages
+MessageSchema.statics.createSystemMessage = async function (
+  conversationId: string,
+  senderId: string,
+  content: string,
+  action: string,
+  additionalMetadata?: Record<string, any>
+) {
+  const systemMessage = new this({
+    conversation: conversationId,
+    sender: senderId,
+    content: content,
+    type: "text",
+    metadata: {
+      isSystemMessage: true,
+      action: action,
+      ...additionalMetadata,
+    },
+  });
+
+  return systemMessage.save();
+};
+
 const Message = (models.Message || model<IMessage, IMessageModel>("Message", MessageSchema)) as IMessageModel;
 
 export default Message;
