@@ -433,7 +433,7 @@ async function analyzeMessageEmotion(
 }
 
 // ============================================
-// GET MESSAGES - UPDATED to include rich_media
+// GET MESSAGES - FIXED: Include metadata field
 // ============================================
 export async function getMessages(
   conversationId: string,
@@ -609,7 +609,8 @@ export async function getMessages(
                 encryption_metadata: 1,
                 type: 1,
                 created_at: 1,
-                rich_media: 1, // ✨ NEW
+                rich_media: 1,
+                metadata: 1, // ✨ INCLUDE metadata for reply_to
                 sender: { $arrayElemAt: ["$senderData", 0] },
                 attachments: 1,
               },
@@ -693,16 +694,18 @@ export async function getMessages(
         },
       },
       
-      // Stage 8: Remove temporary fields and ✨ INCLUDE rich_media
+      // Stage 8: ✨ CRITICAL FIX - Keep all fields including metadata
       {
         $project: {
+          // Remove only temporary fields
           senderData: 0,
           replyToData: 0,
           readByUsersData: 0,
+          // ✨ DO NOT remove any other fields - they'll be included by default
+          // This means metadata, rich_media, etc. will all be included
         },
       },
     ]);
-
     const total = await Message.countDocuments({
       conversation: conversationId,
       $nor: [
@@ -746,7 +749,6 @@ export async function getMessages(
     };
   }
 }
-
 // ============================================
 // GET POPULAR RICH MEDIA IN CONVERSATION - NEW
 // ============================================
