@@ -8,8 +8,8 @@ import {
 } from "@/dtos/user.dto";
 import { connectToDatabase } from "../mongoose";
 import User from "@/database/user.model";
-import { uploadFileToCloudinary } from "./file.action";
 import { clerkClient } from "@clerk/nextjs/server";
+import { uploadFileToCloud } from "./file.action";
 
 /**
  * Set user role in Clerk publicMetadata
@@ -22,8 +22,8 @@ export async function setUserRole(userId: string, role: string) {
     });
     console.log(`✅ Role "${role}" assigned to user: ${userId}`);
   } catch (error) {
-    console.error('Failed to update user role:', error);
-    throw new Error('Could not update user role');
+    console.error("Failed to update user role:", error);
+    throw new Error("Could not update user role");
   }
 }
 
@@ -92,7 +92,9 @@ export async function createUser(userData: UserCreateReq) {
     // ⭐ Set default role "user" in Clerk publicMetadata
     try {
       await setUserRole(userData.clerkId, "user");
-      console.log(`✅ Default role "user" assigned to new user: ${userData.clerkId}`);
+      console.log(
+        `✅ Default role "user" assigned to new user: ${userData.clerkId}`
+      );
     } catch (roleError) {
       console.error("⚠️ Failed to set role, but user was created:", roleError);
       // Don't fail the entire user creation if role assignment fails
@@ -372,7 +374,8 @@ export const uploadUserAvatar = async (clerkId: string, avatarFile: File) => {
       };
     }
 
-    const fileUploadResult = await uploadFileToCloudinary(
+    // ✅ Upload to cloud storage
+    const fileUploadResult = await uploadFileToCloud(
       avatarFile,
       "avatars",
       clerkId
@@ -399,7 +402,7 @@ export const uploadUserAvatar = async (clerkId: string, avatarFile: File) => {
     try {
       const clerk = await clerkClient();
       await clerk.users.updateUser(clerkId, {
-        profileImageID: avatarUrl, // Changed from profileImageUrl
+        profileImageID: avatarUrl,
       });
     } catch (clerkError) {
       console.error("Clerk avatar update error:", clerkError);

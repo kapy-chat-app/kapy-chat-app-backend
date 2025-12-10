@@ -7,12 +7,12 @@ import { auth } from "@clerk/nextjs/server";
 import User from "@/database/user.model";
 import Conversation from "@/database/conversation.model";
 import Message from "@/database/message.model";
-import { HuggingFaceService } from "../services/huggingface.service";
-import EmotionAnalysis from "@/database/emotion-analysis.model";
+import PushToken from "@/database/push-token.model";
+import { sendPushNotification } from "../pushNotification";
+import File from "@/database/file.model";
+import { isUserActiveInConversation } from "../socket/activeUsers";
+import { checkUserActiveInConversation } from "../socket.helper";
 import { emitSocketEvent } from "../socket.helper";
-import { analyzeMessageEmotionsAsync } from "./emotion.action";
-import { uploadEncryptedFileToCloudinary } from "./file.action";
-
 // ============================================
 // CREATE MESSAGE WITH RICH MEDIA - UPDATED
 // ============================================
@@ -22,24 +22,24 @@ export async function createMessage(data: CreateMessageDTO) {
     const { userId } = await auth();
     if (!userId) throw new Error("Unauthorized");
 
-    const { 
-      conversationId, 
+    const {
+      conversationId,
       content,
       encryptedContent,
       encryptionMetadata,
-      type, 
+      type,
       attachments,
       replyTo,
-      richMedia // ✨ NEW
+      richMedia,
     } = data;
 
     const user = await User.findOne({ clerkId: userId });
     if (!user) throw new Error("User not found");
 
     const conversation = await Conversation.findById(conversationId)
-      .select('participants type')
+      .select("participants type")
       .lean();
-    
+
     if (!conversation) throw new Error("Conversation not found");
 
     const isParticipant = conversation.participants.some(
@@ -47,45 +47,53 @@ export async function createMessage(data: CreateMessageDTO) {
     );
     if (!isParticipant) throw new Error("Not a participant");
 
-    // ✨ Validation for text messages
+    // Validation for text messages
     if (type === "text") {
       if (!encryptedContent || encryptedContent.trim().length === 0) {
         throw new Error("Text messages must have encrypted content for E2EE");
       }
     }
 
-    // ✨ NEW: Validation for GIF/Sticker
+    // Validation for GIF/Sticker
     if (type === "gif" || type === "sticker") {
       if (!richMedia || !richMedia.provider || !richMedia.media_url) {
         throw new Error(`${type} messages must have valid rich media data`);
       }
     }
 
-    // ✨ Validation for other media types
-    if (type !== "text" && type !== "gif" && type !== "sticker" && type !== "call_log") {
+    // Validation for other media types
+    if (
+      type !== "text" &&
+      type !== "gif" &&
+      type !== "sticker" &&
+      type !== "call_log"
+    ) {
       if (
         (!attachments || attachments.length === 0) &&
         (!encryptedContent || encryptedContent.trim().length === 0)
       ) {
-        throw new Error("Non-text messages must have attachments or encrypted content");
+        throw new Error(
+          "Non-text messages must have attachments or encrypted content"
+        );
       }
     }
 
-    const allAttachmentIds = attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [];
+    const allAttachmentIds =
+      attachments?.map((id) => new mongoose.Types.ObjectId(id)) || [];
 
-    // ✨ Create message data
+    // Create message data
     const messageData: any = {
       conversation: conversationId,
       sender: user._id,
       content: content?.trim(),
       encrypted_content: encryptedContent,
       encryption_metadata: encryptionMetadata,
-      type: type || (allAttachmentIds.length > 0 ? 'file' : 'text'),
+      type: type || (allAttachmentIds.length > 0 ? "file" : "text"),
       attachments: allAttachmentIds,
       reply_to: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined,
     };
 
-    // ✨ NEW: Add rich_media if present
+    // Add rich_media if present
     if (richMedia && (type === "gif" || type === "sticker")) {
       messageData.rich_media = richMedia;
     }
@@ -93,16 +101,13 @@ export async function createMessage(data: CreateMessageDTO) {
     const message = await Message.create(messageData);
 
     // ==========================================
-    // 🤖 AI EMOTION ANALYSIS (async, không block)
+    // ❌ REMOVED: AI EMOTION ANALYSIS
     // ==========================================
-    if (type === "text" && content && content.trim().length > 0) {
-      analyzeMessageEmotion(message._id, user._id, conversationId, content.trim())
-        .catch(error => console.error("❌ Emotion analysis failed:", error));
-    }
+    // Emotion analysis sẽ được xử lý ở client-side
 
     // Update conversation
     const updateConversationPromise = Conversation.findByIdAndUpdate(
-      conversationId, 
+      conversationId,
       {
         last_message: message._id,
         last_activity: new Date(),
@@ -110,10 +115,10 @@ export async function createMessage(data: CreateMessageDTO) {
       { new: false }
     );
 
-    // ✅ OPTIMIZED: Populate message with aggregation
+    // Populate message with aggregation
     const populateMessagePromise = Message.aggregate([
       {
-        $match: { _id: message._id }
+        $match: { _id: message._id },
       },
       // Lookup sender với avatar
       {
@@ -227,7 +232,7 @@ export async function createMessage(data: CreateMessageDTO) {
                 encryption_metadata: 1,
                 type: 1,
                 created_at: 1,
-                rich_media: 1, // ✨ NEW
+                rich_media: 1,
                 sender: { $arrayElemAt: ["$senderData", 0] },
                 attachments: 1,
               },
@@ -278,7 +283,7 @@ export async function createMessage(data: CreateMessageDTO) {
           edited_at: 1,
           deleted_by: 1,
           metadata: 1,
-          rich_media: 1, // ✨ NEW
+          rich_media: 1,
           created_at: 1,
           updated_at: 1,
           sender: { $arrayElemAt: ["$senderData", 0] },
@@ -322,10 +327,10 @@ export async function createMessage(data: CreateMessageDTO) {
       },
     ]);
 
-    // ✅ Chờ cả 2 operations song song
+    // Chờ cả 2 operations song song
     const [, messages] = await Promise.all([
       updateConversationPromise,
-      populateMessagePromise
+      populateMessagePromise,
     ]);
 
     const messageObj: any = messages[0];
@@ -342,13 +347,15 @@ export async function createMessage(data: CreateMessageDTO) {
       }));
     }
     if (messageObj.reply_to?.attachments) {
-      messageObj.reply_to.attachments = messageObj.reply_to.attachments.map((att: any) => ({
-        ...att,
-        _id: att._id.toString(),
-      }));
+      messageObj.reply_to.attachments = messageObj.reply_to.attachments.map(
+        (att: any) => ({
+          ...att,
+          _id: att._id.toString(),
+        })
+      );
     }
 
-    // ✨ Emit socket event with rich_media
+    // Emit socket event
     await emitSocketEvent(
       "newMessage",
       conversationId,
@@ -363,17 +370,114 @@ export async function createMessage(data: CreateMessageDTO) {
         encrypted_content: encryptedContent,
         encryption_metadata: encryptionMetadata,
         message_type: type,
-        rich_media: richMedia, // ✨ NEW
+        rich_media: richMedia,
         message: {
           ...messageObj,
           content: undefined,
           encrypted_content: encryptedContent,
           encryption_metadata: encryptionMetadata,
-          rich_media: richMedia, // ✨ NEW
+          rich_media: richMedia,
         },
       },
       true
     );
+
+    //Gửi push notification
+    try {
+      const conversation = await Conversation.findById(conversationId)
+        .populate("participants", "_id clerkId")
+        .lean();
+
+      if (conversation) {
+        const recipients = conversation.participants.filter(
+          (p: any) => p.clerkId !== userId
+        );
+
+        for (const recipient of recipients) {
+          console.log(
+            `\n📊 [NOTIFICATION] Processing recipient: ${recipient.clerkId}`
+          );
+
+          // ✅ CHECK: User có đang active trong conversation này không?
+          const isActive = await checkUserActiveInConversation(
+            recipient.clerkId,
+            conversationId
+          );
+
+          console.log(`📊 [NOTIFICATION] Is Active: ${isActive}`);
+
+          if (isActive) {
+            console.log(
+              `⏭️ [NOTIFICATION] SKIPPING - User is active in conversation`
+            );
+            continue; // ✅ Skip push notification
+          }
+
+          // ✅ LẤY PUSH TOKEN
+          const pushTokenDoc = await PushToken.findOne({
+            user: recipient._id,
+            is_active: true,
+          }).sort({ last_used: -1 });
+
+          if (!pushTokenDoc?.token) {
+            console.log(`⏭️ [NOTIFICATION] SKIPPING - No push token found`);
+            continue;
+          }
+
+          // Tạo message preview
+          let messagePreview = "";
+          const notificationData: any = {
+            type: "message",
+            conversationId: conversationId,
+            messageId: messageObj._id,
+            senderId: userId,
+            senderName: user.full_name,
+            senderAvatar: messageObj.sender?.avatar,
+            messageType: type,
+            conversationType: conversation.type,
+            hasAttachments: allAttachmentIds.length > 0,
+          };
+
+          if (type === "text") {
+            messagePreview = "💬 Sent you a message";
+            notificationData.encryptedContent = encryptedContent;
+            notificationData.encryptionMetadata = encryptionMetadata;
+          } else if (type === "image") {
+            messagePreview = "📷 Sent a photo";
+            if (allAttachmentIds.length > 1) {
+              messagePreview = `📷 Sent ${allAttachmentIds.length} photos`;
+            }
+          } else if (type === "video") {
+            messagePreview = "🎥 Sent a video";
+          } else if (type === "gif") {
+            messagePreview = "🎬 Sent a GIF";
+          } else if (type === "sticker") {
+            messagePreview = "😊 Sent a sticker";
+          } else if (type === "file") {
+            messagePreview = "📄 Sent a file";
+          }
+
+          // ✅ GỬI PUSH NOTIFICATION (chỉ khi user không active)
+          await sendPushNotification({
+            pushToken: pushTokenDoc.token,
+            title:
+              conversation.type === "group"
+                ? `${conversation.name || "Group Chat"}`
+                : user.full_name,
+            body: messagePreview,
+            data: notificationData,
+            channelId: "messages",
+            priority: "high",
+          });
+
+          console.log(
+            `✅ [NOTIFICATION] Push sent to ${recipient.clerkId} (not active)`
+          );
+        }
+      }
+    } catch (notifError) {
+      console.error("⚠️ Failed to send push notification:", notifError);
+    }
 
     return {
       success: true,
@@ -382,56 +486,18 @@ export async function createMessage(data: CreateMessageDTO) {
         content: content?.trim(),
         encrypted_content: encryptedContent,
         encryption_metadata: encryptionMetadata,
-        rich_media: richMedia, // ✨ NEW
+        rich_media: richMedia,
       },
     };
   } catch (error) {
     console.error("❌ Error creating message:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to create message",
+      error:
+        error instanceof Error ? error.message : "Failed to create message",
     };
   }
 }
-
-// ✅ Helper function cho emotion analysis (chạy async)
-async function analyzeMessageEmotion(
-  messageId: any,
-  userId: any,
-  conversationId: string,
-  text: string
-) {
-  try {
-    const emotionResult = await HuggingFaceService.analyzeEmotion(text);
-
-    const emotionAnalysis = await EmotionAnalysis.create({
-      user: userId,
-      message: messageId,
-      conversation: conversationId,
-      context: "message",
-      dominant_emotion: emotionResult.emotion,
-      confidence_score: emotionResult.score,
-      emotion_scores: emotionResult.allScores,
-      text_analyzed: text,
-      analyzed_at: new Date()
-    });
-
-    await emitSocketEvent(
-      "emotionAnalyzed",
-      conversationId,
-      {
-        message_id: messageId.toString(),
-        emotion: emotionResult.emotion,
-        score: emotionResult.score,
-        analysis_id: emotionAnalysis._id.toString()
-      },
-      false
-    );
-  } catch (error) {
-    throw error;
-  }
-}
-
 // ============================================
 // GET MESSAGES - FIXED: Include metadata field
 // ============================================
@@ -483,12 +549,12 @@ export async function getMessages(
           ],
         },
       },
-      
+
       // Stage 2: Sort and paginate
       { $sort: { created_at: -1 } },
       { $skip: skip },
       { $limit: limit },
-      
+
       // Stage 3: Lookup sender with avatar in one go
       {
         $lookup: {
@@ -521,7 +587,7 @@ export async function getMessages(
           sender: { $arrayElemAt: ["$senderData", 0] },
         },
       },
-      
+
       // Stage 4: Lookup attachments (metadata only)
       {
         $lookup: {
@@ -546,7 +612,7 @@ export async function getMessages(
           ],
         },
       },
-      
+
       // Stage 5: Lookup reply_to message
       {
         $lookup: {
@@ -624,7 +690,7 @@ export async function getMessages(
           reply_to: { $arrayElemAt: ["$replyToData", 0] },
         },
       },
-      
+
       // Stage 6: Lookup read_by users and avatars together
       {
         $lookup: {
@@ -653,7 +719,7 @@ export async function getMessages(
           as: "readByUsersData",
         },
       },
-      
+
       // Stage 7: Process read_by in single $addFields
       {
         $addFields: {
@@ -693,7 +759,7 @@ export async function getMessages(
           },
         },
       },
-      
+
       // Stage 8: ✨ CRITICAL FIX - Keep all fields including metadata
       {
         $project: {
@@ -789,7 +855,10 @@ export async function getPopularRichMedia(
     console.error("Error getting popular rich media:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to get popular rich media",
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to get popular rich media",
     };
   }
 }
@@ -829,7 +898,10 @@ export async function getRichMediaStats(
     console.error("Error getting rich media stats:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to get rich media stats",
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to get rich media stats",
     };
   }
 }
@@ -954,7 +1026,10 @@ export async function deleteMessage(
 // ============================================
 // ADD REACTION - OPTIMIZED
 // ============================================
-export async function addReaction(messageId: string, reactionType: ReactionType) {
+export async function addReaction(
+  messageId: string,
+  reactionType: ReactionType
+) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
@@ -968,9 +1043,9 @@ export async function addReaction(messageId: string, reactionType: ReactionType)
 
     // Verify user is participant in conversation
     const conversation = await Conversation.findById(message.conversation)
-      .select('participants')
+      .select("participants")
       .lean();
-    
+
     if (!conversation) throw new Error("Conversation not found");
 
     const isParticipant = conversation.participants.some(
@@ -979,7 +1054,15 @@ export async function addReaction(messageId: string, reactionType: ReactionType)
     if (!isParticipant) throw new Error("Not a participant");
 
     // Validate reaction type
-    const validReactions: ReactionType[] = ["heart", "like", "sad", "angry", "laugh", "wow", "dislike"];
+    const validReactions: ReactionType[] = [
+      "heart",
+      "like",
+      "sad",
+      "angry",
+      "laugh",
+      "wow",
+      "dislike",
+    ];
     if (!validReactions.includes(reactionType)) {
       throw new Error("Invalid reaction type");
     }
@@ -1027,8 +1110,8 @@ export async function addReaction(messageId: string, reactionType: ReactionType)
 
     // Emit socket event
     await emitSocketEvent(
-      "newReaction", 
-      message.conversation.toString(), 
+      "newReaction",
+      message.conversation.toString(),
       {
         message_id: messageId,
         user_id: user.clerkId,
@@ -1073,9 +1156,9 @@ export async function removeReaction(messageId: string) {
 
     // Verify user is participant in conversation
     const conversation = await Conversation.findById(message.conversation)
-      .select('participants')
+      .select("participants")
       .lean();
-    
+
     if (!conversation) throw new Error("Conversation not found");
 
     const isParticipant = conversation.participants.some(
@@ -1118,8 +1201,8 @@ export async function removeReaction(messageId: string) {
 
     // Emit socket event
     await emitSocketEvent(
-      "deleteReaction", 
-      message.conversation.toString(), 
+      "deleteReaction",
+      message.conversation.toString(),
       {
         message_id: messageId,
         user_id: user.clerkId,
@@ -1141,7 +1224,8 @@ export async function removeReaction(messageId: string) {
     console.error("Error removing reaction:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to remove reaction",
+      error:
+        error instanceof Error ? error.message : "Failed to remove reaction",
     };
   }
 }
@@ -1171,7 +1255,10 @@ export async function getReactionCounts(messageId: string) {
     console.error("Error getting reaction counts:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to get reaction counts",
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to get reaction counts",
     };
   }
 }
@@ -1224,7 +1311,10 @@ export async function getUsersWhoReacted(
     console.error("Error getting users who reacted:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to get users who reacted",
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to get users who reacted",
     };
   }
 }
@@ -1232,7 +1322,10 @@ export async function getUsersWhoReacted(
 // ============================================
 // TOGGLE REACTION - NEW (Convenience method)
 // ============================================
-export async function toggleReaction(messageId: string, reactionType: ReactionType) {
+export async function toggleReaction(
+  messageId: string,
+  reactionType: ReactionType
+) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
@@ -1246,7 +1339,8 @@ export async function toggleReaction(messageId: string, reactionType: ReactionTy
 
     // Check if user already reacted with this type
     const existingReaction = message.reactions.find(
-      (r: any) => r.user.toString() === user._id.toString() && r.type === reactionType
+      (r: any) =>
+        r.user.toString() === user._id.toString() && r.type === reactionType
     );
 
     if (existingReaction) {
@@ -1260,7 +1354,8 @@ export async function toggleReaction(messageId: string, reactionType: ReactionTy
     console.error("Error toggling reaction:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to toggle reaction",
+      error:
+        error instanceof Error ? error.message : "Failed to toggle reaction",
     };
   }
 }

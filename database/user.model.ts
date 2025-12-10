@@ -1,6 +1,16 @@
-// src/database/models/user.model.ts
+// src/database/models/user.model.ts - UPDATED with backup fields
 import mongoose, { Schema, Document, model } from "mongoose";
 import { models } from "mongoose";
+
+// Backup data structure
+interface IKeyBackupData {
+  encryptedMasterKey: string;
+  salt: string;
+  iv: string;
+  authTag: string;
+  keyVersion: number;
+  createdAt: string;
+}
 
 export interface IUser extends Document {
   clerkId: string;
@@ -8,8 +18,8 @@ export interface IUser extends Document {
   full_name: string;
   username: string;
   bio?: string;
-  avatar?: mongoose.Types.ObjectId; // Ref to File
-  cover_photo?: mongoose.Types.ObjectId; // Ref to File
+  avatar?: mongoose.Types.ObjectId;
+  cover_photo?: mongoose.Types.ObjectId;
   phone?: string;
   date_of_birth?: Date;
   gender?: "male" | "female" | "other" | "private";
@@ -34,9 +44,12 @@ export interface IUser extends Document {
     enable_emotion_suggestions: boolean;
     preferred_suggestion_frequency: "high" | "medium" | "low";
   };
+  // Encryption fields
   encryption_public_key?: string;
   encryption_key_uploaded_at?: Date;
-  status?: string; // Trạng thái cá nhân
+  encryption_backup?: IKeyBackupData; // ✅ NEW: Encrypted backup
+  encryption_backup_created_at?: Date; // ✅ NEW: Backup timestamp
+  status?: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -97,15 +110,25 @@ const UserSchema = new Schema<IUser>({
       default: "medium",
     },
   },
-   encryption_public_key: { 
-      type: String, 
-      default: null,
-      index: true, // ✅ Index for faster queries
-    },
-    encryption_key_uploaded_at: {
-      type: Date,
-      default: null,
-    },
+  // Encryption fields
+  encryption_public_key: { 
+    type: String, 
+    default: null,
+    index: true,
+  },
+  encryption_key_uploaded_at: {
+    type: Date,
+    default: null,
+  },
+  // ✅ NEW: Encrypted backup storage
+  encryption_backup: {
+    type: Schema.Types.Mixed, // Stores IKeyBackupData
+    default: null,
+  },
+  encryption_backup_created_at: {
+    type: Date,
+    default: null,
+  },
   status: { type: String, maxlength: 100 },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
@@ -117,7 +140,7 @@ UserSchema.index({ username: 1 });
 UserSchema.index({ email: 1 });
 UserSchema.index({ is_online: 1, last_seen: -1 });
 
-// Pre-save middleware to update updated_at
+// Pre-save middleware
 UserSchema.pre("save", function (next) {
   this.updated_at = new Date();
   next();

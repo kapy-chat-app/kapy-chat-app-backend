@@ -1,8 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// app/api/conversations/[id]/messages/route.ts - UPDATED WITH RICH MEDIA
+// app/api/conversations/[id]/messages/route.ts - UPDATED WITH CHUNKED UPLOAD SUPPORT
 
 import { CreateMessageDTO } from "@/dtos/message.dto";
-import { uploadMultipleFiles, uploadEncryptedFileToCloudinary } from "@/lib/actions/file.action";
+import { uploadMultipleFiles, uploadEncryptedFile } from "@/lib/actions/file.action";
 import {
   removeReaction,
   deleteMessage,
@@ -11,6 +11,17 @@ import {
 } from "@/lib/actions/message.action";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
+
+// ✅ Tăng timeout và body size limit
+export const maxDuration = 300; // 5 minutes for Vercel
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '100mb', // ✅ Support large encrypted files
+    },
+    responseLimit: false,
+  },
+};
 
 export async function GET(
   req: NextRequest,
@@ -58,6 +69,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const startTime = Date.now();
+  
   try {
     const { userId } = await auth();
     if (!userId) {
@@ -73,86 +86,96 @@ export async function POST(
     let messageData: CreateMessageDTO;
 
     // ==========================================
-    // ✨ CASE 1: JSON (Text, Encrypted Files, GIF, Sticker)
+    // ✅ CASE 1: JSON (Encrypted Files from mobile)
     // ==========================================
     if (contentType.includes('application/json')) {
       const body = await req.json();
       
       console.log('📨 JSON request received:', {
-        hasEncryptedContent: !!body.encryptedContent,
-        hasPlaintextContent: !!body.content,
-        hasEncryptedFiles: !!body.encryptedFiles,
-        hasRichMedia: !!body.richMedia, // ✨ NEW
         type: body.type,
+        hasEncryptedFiles: !!body.encryptedFiles,
+        encryptedFilesCount: body.encryptedFiles?.length || 0,
       });
 
-      // ✨ NEW: Validate GIF/Sticker
-      if (body.type === 'gif' || body.type === 'sticker') {
-        if (!body.richMedia || !body.richMedia.provider || !body.richMedia.media_url) {
-          return NextResponse.json(
-            { 
-              success: false, 
-              error: `Rich media data is required for ${body.type} messages` 
-            },
-            { status: 400 }
-          );
-        }
-        
-        console.log(`✨ ${body.type.toUpperCase()} message with rich media from ${body.richMedia.provider}`);
-        
-        messageData = {
-          ...body,
-          conversationId,
-        };
-      }
-      // ✅ Handle encrypted files from mobile
-      else if (body.encryptedFiles && Array.isArray(body.encryptedFiles)) {
-        console.log(`🔐 Processing ${body.encryptedFiles.length} encrypted files...`);
+      // ✅ Handle encrypted files
+      if (body.encryptedFiles && Array.isArray(body.encryptedFiles)) {
+        console.log(`🔐 Processing ${body.encryptedFiles.length} encrypted file(s)...`);
 
         const uploadedFileIds: string[] = [];
 
-        for (const encFile of body.encryptedFiles) {
+        for (let i = 0; i < body.encryptedFiles.length; i++) {
+          const encFile = body.encryptedFiles[i];
+          const fileIndex = i + 1;
+          
           try {
-            const {
-              encryptedBase64,
-              originalFileName,
-              originalFileType,
-              encryptionMetadata
-            } = encFile;
-
-            if (!encryptedBase64 || !encryptionMetadata) {
-              console.error('❌ Invalid encrypted file data');
+            // ✅ CHECK: Is this a large file (already uploaded)?
+            if (encFile.isLargeFile && encFile.encryptedFileId) {
+              console.log(`📦 [${fileIndex}/${body.encryptedFiles.length}] Large file (already uploaded): ${encFile.originalFileName}`);
+              console.log(`   File ID: ${encFile.encryptedFileId}`);
+              
+              // ✅ CRITICAL: Just add the file ID reference
+              uploadedFileIds.push(encFile.encryptedFileId);
+              
+              console.log(`✅ [${fileIndex}/${body.encryptedFiles.length}] Large file reference added`);
               continue;
             }
 
-            console.log(`📤 Uploading encrypted file to Cloudinary: ${originalFileName}`);
+            // ✅ CASE 2: Small file (direct upload via base64)
+            if (!encFile.encryptedBase64 || !encFile.encryptionMetadata) {
+              console.error(`❌ [${fileIndex}/${body.encryptedFiles.length}] Invalid encrypted file data`);
+              console.error('   Missing fields:', {
+                hasBase64: !!encFile.encryptedBase64,
+                hasMetadata: !!encFile.encryptionMetadata,
+                hasFileId: !!encFile.encryptedFileId,
+                isLargeFile: !!encFile.isLargeFile,
+              });
+              continue;
+            }
 
-            const uploadResult = await uploadEncryptedFileToCloudinary(
-              encryptedBase64,
-              originalFileName,
-              originalFileType,
-              encryptionMetadata
+            // Upload small file
+            const fileSizeBytes = (encFile.encryptedBase64.length * 3) / 4;
+            const fileSizeMB = (fileSizeBytes / 1024 / 1024).toFixed(2);
+
+            console.log(`📤 [${fileIndex}/${body.encryptedFiles.length}] Uploading (direct): ${encFile.originalFileName} (${fileSizeMB} MB)`);
+
+            const uploadResult = await uploadEncryptedFile(
+              encFile.encryptedBase64,
+              encFile.originalFileName,
+              encFile.originalFileType,
+              encFile.encryptionMetadata
             );
 
             if (uploadResult.success && uploadResult.file) {
               uploadedFileIds.push(uploadResult.file.id);
-              console.log(`✅ Encrypted file uploaded: ${originalFileName} (ID: ${uploadResult.file.id})`);
+              console.log(`✅ [${fileIndex}/${body.encryptedFiles.length}] Uploaded: ${encFile.originalFileName}`);
             } else {
-              console.error(`❌ Failed to upload encrypted file: ${originalFileName}`, uploadResult.error);
+              console.error(`❌ [${fileIndex}/${body.encryptedFiles.length}] Upload failed:`, uploadResult.error);
             }
-          } catch (error) {
-            console.error('❌ Error uploading encrypted file:', error);
+          } catch (error: any) {
+            console.error(`❌ [${fileIndex}/${body.encryptedFiles.length}] Error:`, error?.message);
           }
         }
 
-        console.log(`✅ Uploaded ${uploadedFileIds.length}/${body.encryptedFiles.length} encrypted files`);
+        const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`✅ Processed ${uploadedFileIds.length}/${body.encryptedFiles.length} file(s) in ${totalElapsed}s`);
+
+        if (uploadedFileIds.length === 0 && body.encryptedFiles.length > 0) {
+          return NextResponse.json(
+            { 
+              success: false, 
+              error: "All file uploads failed" 
+            },
+            { status: 400 }
+          );
+        }
 
         messageData = {
           ...body,
           conversationId,
-          attachments: uploadedFileIds.length > 0 ? uploadedFileIds : body.attachments,
+          attachments: uploadedFileIds,
         };
 
+        // ✅ Clean up
         delete (messageData as any).encryptedFiles;
 
       } else {
@@ -176,7 +199,7 @@ export async function POST(
       const replyTo = formData.get('replyTo') as string | null;
       const files = formData.getAll('files') as File[];
 
-      console.log(`📤 FormData: Uploading ${files.length} non-encrypted files of type: ${type}`);
+      console.log(`📤 FormData: Uploading ${files.length} non-encrypted file(s) of type: ${type}`);
 
       const uploadResult = await uploadMultipleFiles(files, 'chatapp/messages', userId);
 
@@ -205,7 +228,7 @@ export async function POST(
         replyTo: replyTo || undefined,
       };
 
-      console.log(`✅ FormData message created with ${attachmentIds.length} attachments`);
+      console.log(`✅ FormData message created with ${attachmentIds.length} attachment(s)`);
     }
     // ==========================================
     // ✨ CASE 3: INVALID REQUEST
@@ -249,7 +272,7 @@ export async function POST(
             error: "Encrypted content is required for text messages (E2EE enabled)" 
           },
           { status: 400 }
-        );
+      );
       }
       console.log('✅ Text message has encrypted content');
     }
@@ -259,7 +282,7 @@ export async function POST(
       type: messageData.type,
       hasContent: !!messageData.content,
       hasEncryptedContent: !!messageData.encryptedContent,
-      hasRichMedia: !!messageData.richMedia, // ✨ NEW
+      hasRichMedia: !!messageData.richMedia,
       hasAttachments: !!messageData.attachments?.length,
       attachmentsCount: messageData.attachments?.length || 0
     });
@@ -277,7 +300,8 @@ export async function POST(
       );
     }
 
-    console.log('✅ Message created successfully');
+    const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ Message created successfully in ${totalElapsed}s`);
 
     return NextResponse.json(
       {
@@ -287,12 +311,25 @@ export async function POST(
       },
       { status: 201 }
     );
-  } catch (error) {
-    console.error("❌ API Route Error:", error);
+  } catch (error: any) {
+    const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`❌ API Route Error after ${totalElapsed}s:`, error);
+    
+    // ✅ Better error messages
+    let errorMessage = "Internal server error";
+    
+    if (error?.message?.includes('timeout')) {
+      errorMessage = "Request timeout. File may be too large or connection is slow.";
+    } else if (error?.message?.includes('too large')) {
+      errorMessage = "File size exceeds limit. Maximum 100MB per file.";
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
+    }
+    
     return NextResponse.json(
       { 
         success: false, 
-        error: error instanceof Error ? error.message : "Internal server error" 
+        error: errorMessage
       },
       { status: 500 }
     );

@@ -1,35 +1,21 @@
 /* eslint-disable @typescript-eslint/prefer-as-const */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/actions/file.actions.ts
+// lib/actions/file.action.ts
 import { FileRes } from "@/dtos/file.dto";
-import { v2 as cloudinary } from "cloudinary";
 import { connectToDatabase } from "../mongoose";
 import console from "console";
 import File from "@/database/file.model";
 import { auth } from "@clerk/nextjs/server";
 import User from "@/database/user.model";
-import crypto from 'crypto';
 import Message from "@/database/message.model";
-
-// Cấu hình Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
-});
-
-const validateCloudinaryConfig = () => {
-  if (
-    !process.env.CLOUDINARY_CLOUD_NAME ||
-    !process.env.CLOUDINARY_API_KEY ||
-    !process.env.CLOUDINARY_API_SECRET
-  ) {
-    throw new Error(
-      "Missing Cloudinary configuration. Please check your environment variables."
-    );
-  }
-};
+// ✅ S3 imports
+import { 
+  uploadToS3, 
+  uploadEncryptedFileToS3 as uploadEncryptedToS3, 
+  deleteFromS3, 
+  downloadFromS3, 
+  getS3PresignedUrl 
+} from "@/lib/s3";
 
 export interface FileUploadResult {
   success: boolean;
@@ -43,7 +29,8 @@ export interface FileDeleteResult {
   error?: string;
 }
 
-export const uploadFileToCloudinary = async (
+// ✅ Upload regular file to cloud storage (S3)
+export const uploadFileToCloud = async (
   file: File,
   folder: string = "chatapp",
   userId?: string
@@ -53,7 +40,6 @@ export const uploadFileToCloudinary = async (
       `🚀 Starting file upload for: ${file.name}, size: ${file.size} bytes`
     );
 
-    validateCloudinaryConfig();
     await connectToDatabase();
     console.log("✅ Connected to database");
 
@@ -61,9 +47,9 @@ export const uploadFileToCloudinary = async (
       throw new Error("Invalid file: File is empty or undefined");
     }
 
-    const maxSize = 10 * 1024 * 1024; // 10MB
+    const maxSize = 100 * 1024 * 1024; // 100MB
     if (file.size > maxSize) {
-      throw new Error("File size exceeds 10MB limit");
+      throw new Error("File size exceeds 100MB limit");
     }
 
     const allowedTypes = [
@@ -104,72 +90,30 @@ export const uploadFileToCloudinary = async (
     const buffer = Buffer.from(arrayBuffer);
     console.log(`✅ File converted to buffer, size: ${buffer.length} bytes`);
 
-    const base64String = buffer.toString("base64");
-    const dataURI = `data:${file.type};base64,${base64String}`;
-
-    // ✅ Xác định resource type
-    let resourceType: "image" | "video" | "raw" = "raw";
-    const isAudio = file.type.startsWith("audio/");
-
-    if (file.type.startsWith("image/")) {
-      resourceType = "image";
-    } else if (file.type.startsWith("video/") || isAudio) {
-      // ✅ Audio files cần upload với resource_type = "video"
-      resourceType = "video";
-    }
-
-    const timestamp = Date.now();
-    const randomString = Math.random().toString(36).substring(2);
-    const fileNameWithoutExt = file.name
-      .split(".")[0]
-      .replace(/[^a-zA-Z0-9]/g, "_");
-    const publicId = `${timestamp}_${randomString}_${fileNameWithoutExt}`;
-
-    console.log(`📤 Uploading to Cloudinary with public_id: ${publicId}`);
-
-    // ✅ Upload với config phù hợp
-    const uploadOptions: any = {
-      folder: folder,
-      resource_type: resourceType,
-      public_id: publicId,
-    };
-
-    // Image transformations
-    if (resourceType === "image") {
-      uploadOptions.transformation = [
-        { quality: "auto:good" },
-        { fetch_format: "auto" },
-      ];
-    }
-
-    // Video transformations
-    if (resourceType === "video" && !isAudio) {
-      uploadOptions.video_codec = "auto";
-      uploadOptions.quality = "auto:good";
-    }
-
-    // ✅ Audio conversion sang MP3
-    if (isAudio) {
-      uploadOptions.format = "mp3"; // Convert sang MP3
-      uploadOptions.resource_type = "video"; // Required for audio
-    }
-
-    const uploadResult = await cloudinary.uploader.upload(
-      dataURI,
-      uploadOptions
+    // ✅ Upload to S3
+    const uploadResult = await uploadToS3(
+      buffer,
+      file.name,
+      file.type,
+      folder
     );
+
+    if (!uploadResult.success) {
+      throw new Error(`Cloud storage upload failed: ${uploadResult.error}`);
+    }
 
     console.log(
-      `✅ Cloudinary upload successful, secure_url: ${uploadResult.secure_url}`
+      `✅ Cloud storage upload successful, url: ${uploadResult.url}`
     );
 
-    // ✅ Lưu với file_type đúng (vẫn giữ original type)
+    // ✅ Save to database
     const fileData = {
       file_name: file.name,
       file_type: file.type,
       file_size: file.size,
-      file_path: uploadResult.public_id,
-      url: uploadResult.secure_url,
+      file_path: uploadResult.key!,
+      url: uploadResult.url!,
+      cloudinary_public_id: uploadResult.key, // Reuse field for storage key
     };
 
     console.log("💾 Saving file metadata to database...");
@@ -205,13 +149,13 @@ export const uploadFileToCloudinary = async (
   }
 };
 
-export const deleteFileFromCloudinary = async (
+// ✅ Delete regular file from cloud storage (S3)
+export const deleteFileFromCloud = async (
   fileId: string
 ): Promise<FileDeleteResult> => {
   try {
     console.log(`🗑️ Starting file deletion for ID: ${fileId}`);
 
-    validateCloudinaryConfig();
     await connectToDatabase();
 
     const file = await File.findById(fileId);
@@ -220,33 +164,14 @@ export const deleteFileFromCloudinary = async (
     }
 
     console.log(
-      `📁 Found file: ${file.file_name}, public_id: ${file.file_path}`
+      `📁 Found file: ${file.file_name}, storage_key: ${file.file_path}`
     );
 
-    // ✅ Xác định resource type cho deletion
-    let resourceType: "image" | "video" | "raw" = "raw";
-    if (file.file_type.startsWith("image/")) {
-      resourceType = "image";
-    } else if (
-      file.file_type.startsWith("video/") ||
-      file.file_type.startsWith("audio/")
-    ) {
-      resourceType = "video"; // Audio cũng dùng "video"
-    }
+    console.log(`☁️ Deleting from cloud storage...`);
+    const deleted = await deleteFromS3(file.file_path);
 
-    console.log(
-      `🌥️ Deleting from Cloudinary with resource_type: ${resourceType}`
-    );
-    const deleteResult = await cloudinary.uploader.destroy(file.file_path, {
-      resource_type: resourceType,
-    });
-
-    console.log(`Cloudinary deletion result:`, deleteResult);
-
-    if (deleteResult.result !== "ok" && deleteResult.result !== "not found") {
-      throw new Error(
-        `Cloudinary deletion failed: ${JSON.stringify(deleteResult)}`
-      );
+    if (!deleted) {
+      console.warn("⚠️ Cloud storage deletion failed, but continuing with DB deletion");
     }
 
     console.log("🗄️ Deleting from database...");
@@ -320,7 +245,7 @@ export const uploadMultipleFiles = async (
 
   for (const file of files) {
     try {
-      const result = await uploadFileToCloudinary(file, folder, userId);
+      const result = await uploadFileToCloud(file, folder, userId);
 
       if (result.success && result.file) {
         successful.push(result.file);
@@ -377,11 +302,8 @@ export const getFilesByType = async (
   }
 };
 
-/**
- * ✨ UPDATED: Upload encrypted file to Cloudinary ONLY
- * Không lưu encrypted_data vào MongoDB
- */
-export async function uploadEncryptedFileToCloudinary(
+// ✅ Upload encrypted file to cloud storage (S3)
+export async function uploadEncryptedFile(
   encryptedBase64: string,
   originalFileName: string,
   originalFileType: string,
@@ -397,55 +319,61 @@ export async function uploadEncryptedFileToCloudinary(
     const { userId } = await auth();
     if (!userId) throw new Error("Unauthorized");
 
-    console.log("File AuthTag>>>",encryptionMetadata.authTag); 
-
     const user = await User.findOne({ clerkId: userId });
     if (!user) throw new Error("User not found");
 
-    console.log("📤 Uploading encrypted file to Cloudinary:", {
+    console.log("📤 Uploading encrypted file to cloud storage:", {
       fileName: originalFileName,
       encryptedSize: encryptionMetadata.encrypted_size,
       originalSize: encryptionMetadata.original_size,
+      sizeInMB: (encryptedBase64.length / 1024 / 1024).toFixed(2) + " MB",
     });
 
-    // ✅ Validate encrypted data
     if (!encryptedBase64 || encryptedBase64.length === 0) {
       throw new Error("Encrypted data is empty");
     }
 
-    // ✅ Upload encrypted data lên Cloudinary với access_mode: authenticated
-    const uploadResult = await cloudinary.uploader.upload(
-      `data:application/octet-stream;base64,${encryptedBase64}`,
+    const base64Size = (encryptedBase64.length * 3) / 4;
+    const maxSize = 100 * 1024 * 1024;
+    
+    if (base64Size > maxSize) {
+      throw new Error(`Encrypted file too large: ${(base64Size / 1024 / 1024).toFixed(2)} MB. Max: 100 MB`);
+    }
+
+    console.log(`✅ Size check passed: ${(base64Size / 1024 / 1024).toFixed(2)} MB`);
+
+    const buffer = Buffer.from(encryptedBase64, 'base64');
+
+    const uploadResult = await uploadEncryptedToS3(
+      buffer,
+      originalFileName,
+      originalFileType,
       {
-        resource_type: "raw",
-        folder: "encrypted_files",
-        public_id: `${Date.now()}_${originalFileName.replace(
-          /[^a-zA-Z0-9]/g,
-          "_"
-        )}`,
-        transformation: [],
-        access_mode: "authenticated", // ✅ QUAN TRỌNG: Chỉ access qua signed URL
-        type: "authenticated", // ✅ Set type để Cloudinary biết đây là authenticated resource
-        flags: "attachment"
+        iv: encryptionMetadata.iv,
+        authTag: encryptionMetadata.authTag,
+        original_size: encryptionMetadata.original_size.toString(),
+        encrypted_size: encryptionMetadata.encrypted_size.toString(),
       }
     );
 
-    console.log("✅ Encrypted file uploaded to Cloudinary:", {
-      url: uploadResult.secure_url,
-      public_id: uploadResult.public_id,
-      type: uploadResult.type,
+    if (!uploadResult.success) {
+      throw new Error(`Cloud storage upload failed: ${uploadResult.error}`);
+    }
+
+    console.log("✅ Encrypted file uploaded to cloud storage:", {
+      url: uploadResult.url,
+      key: uploadResult.key,
+      bytes: uploadResult.size,
     });
 
-    // ✅ CHỈ lưu metadata + Cloudinary URL vào DB
     const file = await File.create({
       file_name: originalFileName,
       file_type: originalFileType,
       file_size: encryptionMetadata.encrypted_size,
-      file_path: uploadResult.public_id, // ✅ Lưu public_id thay vì URL
-      url: uploadResult.secure_url,
-      cloudinary_public_id: uploadResult.public_id,
+      file_path: uploadResult.key!,
+      url: uploadResult.url!,
+      cloudinary_public_id: uploadResult.key,
       is_encrypted: true,
-      // ❌ KHÔNG LƯU encrypted_data
       encryption_metadata: {
         iv: encryptionMetadata.iv,
         authTag: encryptionMetadata.authTag,
@@ -455,17 +383,13 @@ export async function uploadEncryptedFileToCloudinary(
       uploaded_by: user._id,
     });
 
-    console.log("✅ File metadata saved to database:", {
-      fileId: file._id,
-      cloudinaryId: file.cloudinary_public_id,
-      isEncrypted: file.is_encrypted,
-    });
+    console.log("✅ File metadata saved:", file._id);
 
     return {
       success: true,
       data: {
         fileId: file._id.toString(),
-        url: uploadResult.secure_url,
+        url: uploadResult.url,
         fileName: originalFileName,
         fileType: originalFileType,
         fileSize: encryptionMetadata.encrypted_size,
@@ -475,11 +399,27 @@ export async function uploadEncryptedFileToCloudinary(
         name: originalFileName,
         type: originalFileType,
         size: encryptionMetadata.encrypted_size,
-        url: uploadResult.secure_url,
+        url: uploadResult.url,
       },
     };
   } catch (error) {
     console.error("❌ Error uploading encrypted file:", error);
+    
+    if (error instanceof Error) {
+      if (error.message.includes('timeout')) {
+        return {
+          success: false,
+          error: "Upload timeout. File may be too large or connection is slow.",
+        };
+      }
+      if (error.message.includes('too large')) {
+        return {
+          success: false,
+          error: error.message,
+        };
+      }
+    }
+    
     return {
       success: false,
       error: error instanceof Error ? error.message : "Upload failed",
@@ -487,13 +427,10 @@ export async function uploadEncryptedFileToCloudinary(
   }
 }
 
-/**
- * ✨ UPDATED: Generate signed URL for encrypted file from Cloudinary
- * URL có thời hạn 1 giờ
- */
+// ✅ Generate presigned URL for file download
 export const generateSignedFileUrl = async (
   fileId: string,
-  userId: string // Clerk userId
+  userId: string
 ): Promise<{ success: boolean; signedUrl?: string; metadata?: any; error?: string }> => {
   try {
     await connectToDatabase();
@@ -503,7 +440,6 @@ export const generateSignedFileUrl = async (
       throw new Error('File not found');
     }
 
-    // ✅ Non-encrypted files trả về URL thông thường
     if (!file.is_encrypted) {
       return {
         success: true,
@@ -517,8 +453,7 @@ export const generateSignedFileUrl = async (
       };
     }
 
-    console.log('🔐 Generating signed URL for encrypted file:', file.file_name);
-
+    console.log('🔐 Generating presigned URL for encrypted file:', file.file_name);
 
     const message = await Message.findOne({
       attachments: fileId,
@@ -534,7 +469,6 @@ export const generateSignedFileUrl = async (
       throw new Error('File not found in any message');
     }
 
-    // ✅ Check if user is participant
     const conversation = message.conversation as any;
     const isParticipant = conversation.participants.some(
       (p: any) => p.clerkId === userId
@@ -544,23 +478,9 @@ export const generateSignedFileUrl = async (
       throw new Error('Unauthorized to access this file');
     }
 
-    // ✅ Generate signed URL với expiration (1 hour)
-    const timestamp = Math.floor(Date.now() / 1000) + 3600; // Expire in 1 hour
-    
-    // ✅ FIXED: Generate signature cho authenticated resource
-    const apiSecret = process.env.CLOUDINARY_API_SECRET!;
-    const stringToSign = `public_id=${file.cloudinary_public_id}&timestamp=${timestamp}${apiSecret}`;
-    const signature = crypto
-      .createHash('sha256')
-      .update(stringToSign)
-      .digest('hex');
+    const signedUrl = await getS3PresignedUrl(file.file_path, 3600);
 
-    // ✅ Build signed URL
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const apiKey = process.env.CLOUDINARY_API_KEY;
-    const signedUrl = `https://res.cloudinary.com/${cloudName}/raw/authenticated/v1/${file.cloudinary_public_id}?timestamp=${timestamp}&signature=${signature}&api_key=${apiKey}`;
-
-    console.log('✅ Generated signed URL (expires in 1h)');
+    console.log('✅ Generated presigned URL (expires in 1h)');
 
     return {
       success: true,
@@ -575,7 +495,7 @@ export const generateSignedFileUrl = async (
       },
     };
   } catch (error) {
-    console.error('❌ Failed to generate signed URL:', error);
+    console.error('❌ Failed to generate presigned URL:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Failed to generate URL',
@@ -583,38 +503,28 @@ export const generateSignedFileUrl = async (
   }
 };
 
-/**
- * ✅ FIXED: Download encrypted file from Cloudinary
- * Sử dụng config pattern giống như uploadFileToCloudinary
- */
+// ✅ Download encrypted file from cloud storage
 export async function downloadEncryptedFile(fileId: string, clerkUserId: string) {
   try {
-    console.log(`\n📥 [DOWNLOAD DEBUG] Starting encrypted file download for ID: ${fileId}`);
+    console.log(`\n📥 [DOWNLOAD] Starting encrypted file download for ID: ${fileId}`);
 
-    validateCloudinaryConfig();
     await connectToDatabase();
-    console.log("✅ [DOWNLOAD DEBUG] Connected to MongoDB");
 
-    // 🧩 User validation
     const user = await User.findOne({ clerkId: clerkUserId });
     if (!user) throw new Error("User not found");
-    console.log(`👤 [DOWNLOAD DEBUG] Authenticated user: ${user.clerkId}`);
 
-    // 🗂️ File lookup
     const file = await File.findById(fileId);
     if (!file) return { success: false, error: "File not found" };
     if (!file.is_encrypted)
-      return { success: false, error: "File is not encrypted. Use normal download." };
+      return { success: false, error: "File is not encrypted" };
 
-    console.log("📁 [DOWNLOAD DEBUG] Found encrypted file:", {
+    console.log("📁 Found encrypted file:", {
       fileName: file.file_name,
-      publicId: file.cloudinary_public_id,
+      storageKey: file.file_path,
       type: file.file_type,
       size: file.file_size,
-      hasMetadata: !!file.encryption_metadata,
     });
 
-    // 🧑‍🤝‍🧑 Verify access
     const message = await Message.findOne({ attachments: fileId }).populate({
       path: "conversation",
       populate: { path: "participants", select: "clerkId" },
@@ -627,124 +537,37 @@ export async function downloadEncryptedFile(fileId: string, clerkUserId: string)
     );
     if (!isParticipant) throw new Error("Unauthorized to access this file");
 
-    console.log("✅ [DOWNLOAD DEBUG] User authorized to access file");
+    console.log("✅ User authorized to access file");
 
-    // 🌥️ Cloudinary fetch
-    const resourceType: "raw" = "raw";
-    console.log(
-      `🌩️ [CLOUDINARY INFO] Requesting resource: ${file.cloudinary_public_id} (type=authenticated, resource_type=${resourceType})`
-    );
+    console.log(`📥 Downloading from cloud storage: ${file.file_path}`);
+    const buffer = await downloadFromS3(file.file_path);
+    const base64 = buffer.toString("base64");
 
-    try {
-      const resource = await cloudinary.api.resource(file.cloudinary_public_id, {
-        resource_type: resourceType,
-        type: "authenticated",
-      });
+    console.log("✅ File downloaded successfully:", {
+      size: (buffer.length / 1024 / 1024).toFixed(2) + " MB",
+      base64Length: base64.length,
+    });
 
-      console.log("✅ [CLOUDINARY INFO] Resource metadata fetched:", {
-        public_id: resource.public_id,
-        bytes: resource.bytes,
-        created_at: resource.created_at,
-      });
-
-      // 📦 Download file content
-      console.log(`📥 [DOWNLOAD DEBUG] Fetching encrypted content from secure_url...`);
-      const response = await fetch(resource.secure_url);
-      if (!response.ok)
-        throw new Error(`Download failed: ${response.statusText} (${response.status})`);
-
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const base64 = buffer.toString("base64");
-
-      // 🔍 Integrity check
-      const hashDownloaded = crypto.createHash("sha256").update(buffer).digest("hex");
-
-      console.log("🔍 [INTEGRITY CHECK] Download completed:");
-      console.log(`   - Base64 length: ${base64.length}`);
-      console.log(`   - Base64 prefix: ${base64.slice(0, 80)}...`);
-      console.log(`   - SHA256 hash (downloaded): ${hashDownloaded}`);
-
-      if (file.encryption_metadata?.hash) {
-        console.log(
-          `   - SHA256 (original in DB): ${file.encryption_metadata.hash}`
-        );
-        if (hashDownloaded !== file.encryption_metadata.hash) {
-          console.warn(
-            "⚠️ [INTEGRITY WARNING] File differs from original upload! Possible Cloudinary transformation."
-          );
-        } else {
-          console.log("✅ [INTEGRITY CHECK] File hash matches original upload.");
-        }
-      }
-
-      console.log("🎉 [DOWNLOAD DEBUG] Encrypted file downloaded successfully.");
-      return {
-        success: true,
-        data: {
-          encryptedData: base64,
-          encryptionMetadata: file.encryption_metadata,
-          fileName: file.file_name,
-          fileType: file.file_type,
-          downloadedHash: hashDownloaded,
-        },
-      };
-    } catch (cloudinaryError) {
-      console.error("❌ [CLOUDINARY ERROR] Admin API failed:", cloudinaryError);
-      console.log("⚠️ [FALLBACK] Using signed URL to fetch encrypted data...");
-
-      // 🧾 Generate fallback signed URL
-      const timestamp = Math.floor(Date.now() / 1000) + 3600;
-      const apiSecret = process.env.CLOUDINARY_API_SECRET!;
-      const stringToSign = `public_id=${file.cloudinary_public_id}&timestamp=${timestamp}${apiSecret}`;
-      const signature = crypto.createHash("sha256").update(stringToSign).digest("hex");
-
-      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-      const apiKey = process.env.CLOUDINARY_API_KEY;
-      const signedUrl = `https://res.cloudinary.com/${cloudName}/raw/authenticated/v1/${file.cloudinary_public_id}?timestamp=${timestamp}&signature=${signature}&api_key=${apiKey}`;
-
-      console.log("🔑 [FALLBACK] Generated signed URL:", signedUrl);
-
-      // 🪂 Download via signed URL
-      const response = await fetch(signedUrl);
-      if (!response.ok)
-        throw new Error(`Signed URL download failed: ${response.statusText}`);
-
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const base64 = buffer.toString("base64");
-      const hashDownloaded = crypto.createHash("sha256").update(buffer).digest("hex");
-
-      console.log("🔍 [FALLBACK INTEGRITY CHECK]:");
-      console.log(`   - Base64 length: ${base64.length}`);
-      console.log(`   - Base64 prefix: ${base64.slice(0, 80)}...`);
-      console.log(`   - SHA256 hash: ${hashDownloaded}`);
-
-      console.log("✅ [FALLBACK] Encrypted file downloaded via signed URL.");
-
-      return {
-        success: true,
-        data: {
-          encryptedData: base64,
-          encryptionMetadata: file.encryption_metadata,
-          fileName: file.file_name,
-          fileType: file.file_type,
-          downloadedHash: hashDownloaded,
-        },
-      };
-    }
+    return {
+      success: true,
+      data: {
+        encryptedData: base64,
+        encryptionMetadata: file.encryption_metadata,
+        fileName: file.file_name,
+        fileType: file.file_type,
+      },
+    };
   } catch (error) {
-    console.error("❌ [DOWNLOAD ERROR] Encrypted file download failed:", error);
+    console.error("❌ Download error:", error);
     return {
       success: false,
       error: error instanceof Error ? error.message : "Download failed",
     };
   }
 }
-/**
- * ✨ UPDATED: Delete encrypted file from Cloudinary
- */
-export const deleteEncryptedFileFromCloudinary = async (
+
+// ✅ Delete encrypted file from cloud storage
+export const deleteEncryptedFile = async (
   fileId: string
 ): Promise<{ success: boolean; message?: string; error?: string }> => {
   try {
@@ -761,27 +584,14 @@ export const deleteEncryptedFileFromCloudinary = async (
       throw new Error("File is not encrypted. Use normal deletion.");
     }
 
-    console.log("🌥️ Deleting authenticated resource from Cloudinary...");
+    console.log("☁️ Deleting from cloud storage...");
 
-    // ✅ Delete từ Cloudinary với type="authenticated"
-    const deleteResult = await cloudinary.uploader.destroy(
-      file.cloudinary_public_id!,
-      {
-        resource_type: "raw",
-        type: "authenticated", // ✅ QUAN TRỌNG
-        invalidate: true,
-      }
-    );
-
-    console.log("Cloudinary deletion result:", deleteResult);
-
-    if (deleteResult.result !== "ok" && deleteResult.result !== "not found") {
-      throw new Error(
-        `Cloudinary deletion failed: ${JSON.stringify(deleteResult)}`
-      );
+    const deleted = await deleteFromS3(file.file_path);
+    
+    if (!deleted) {
+      console.warn("⚠️ Cloud storage deletion failed, but continuing with DB deletion");
     }
 
-    // ✅ Delete from DB
     await File.findByIdAndDelete(fileId);
     console.log("✅ Encrypted file deleted successfully");
 

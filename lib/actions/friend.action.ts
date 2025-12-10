@@ -21,7 +21,9 @@ import {
 import { connectToDatabase } from "../mongoose";
 import User from "@/database/user.model";
 import { StringExpression } from "mongoose";
-import { emitToUserRoom } from "../socket.helper";  // ✅ ĐỔI IMPORT
+import { emitToUserRoom } from "../socket.helper"; // ✅ ĐỔI IMPORT
+import PushToken from "@/database/push-token.model";
+import { sendPushNotification } from "../pushNotification";
 
 // ============================================
 // TÌM KIẾM NGƯỜI DÙNG
@@ -217,28 +219,20 @@ export async function sendFriendRequest(
 
     // ===== SOCKET EVENTS =====
     // Emit to recipient - friend request received
-    await emitToUserRoom(
-      "friendRequestReceived",
-      recipient.clerkId,
-      {
-        request_id: friendship._id.toString(),
-        requester_id: currentUserData.clerkId,
-        requester_name: currentUserData.full_name,
-        requester_avatar: currentUserData.avatar?.url || null,
-      }
-    );
+    await emitToUserRoom("friendRequestReceived", recipient.clerkId, {
+      request_id: friendship._id.toString(),
+      requester_id: currentUserData.clerkId,
+      requester_name: currentUserData.full_name,
+      requester_avatar: currentUserData.avatar?.url || null,
+    });
 
     // Emit to requester - confirmation
-    await emitToUserRoom(
-      "friendRequestSent",
-      currentUserData.clerkId,
-      {
-        request_id: friendship._id.toString(),
-        recipient_id: recipient.clerkId,
-        recipient_name: recipient.full_name,
-        recipient_avatar: recipient.avatar?.url || null,
-      }
-    );
+    await emitToUserRoom("friendRequestSent", currentUserData.clerkId, {
+      request_id: friendship._id.toString(),
+      recipient_id: recipient.clerkId,
+      recipient_name: recipient.full_name,
+      recipient_avatar: recipient.avatar?.url || null,
+    });
 
     // Update friend request count for recipient
     const recipientRequestCount = await Friendship.countDocuments({
@@ -246,13 +240,40 @@ export async function sendFriendRequest(
       status: "pending",
     });
 
-    await emitToUserRoom(
-      "friendRequestCountUpdated",
-      recipient.clerkId,
-      {
-        count: recipientRequestCount,
+    await emitToUserRoom("friendRequestCountUpdated", recipient.clerkId, {
+      count: recipientRequestCount,
+    });
+    try {
+      // ✅ LẤY PUSH TOKEN TỪ MONGODB
+      const pushTokenDoc = await PushToken.findOne({
+        user: recipient._id,
+        is_active: true,
+      }).sort({ last_used: -1 });
+
+      if (pushTokenDoc?.token) {
+        await sendPushNotification({
+          pushToken: pushTokenDoc.token,
+          title: "👋 New friend request",
+          body: `${currentUserData.full_name} sent you a friend request`,
+          data: {
+            type: "friend_request",
+            requestId: friendship._id.toString(),
+            requesterId: currentUserData.clerkId,
+          },
+          channelId: "friend_requests",
+          priority: "default",
+        });
+
+        console.log(
+          `✅ Friend request notification sent to ${recipient.clerkId}`
+        );
       }
-    );
+    } catch (notifError) {
+      console.error(
+        "⚠️ Failed to send friend request notification:",
+        notifError
+      );
+    }
 
     return { success: true, message: "Friend request sent successfully" };
   } catch (error) {
@@ -312,30 +333,22 @@ export async function respondToFriendRequest(
     // ===== SOCKET EVENTS =====
     if (action === "accept") {
       // Emit to requester - their request was accepted
-      await emitToUserRoom(
-        "friendRequestAccepted",
-        requester.clerkId,
-        {
-          request_id: requestId,
-          accepted_by: currentUserData.clerkId,
-          new_friend_id: currentUserData.clerkId,
-          new_friend_name: currentUserData.full_name,
-          new_friend_avatar: currentUserData.avatar?.url || null,
-        }
-      );
+      await emitToUserRoom("friendRequestAccepted", requester.clerkId, {
+        request_id: requestId,
+        accepted_by: currentUserData.clerkId,
+        new_friend_id: currentUserData.clerkId,
+        new_friend_name: currentUserData.full_name,
+        new_friend_avatar: currentUserData.avatar?.url || null,
+      });
 
       // Emit to recipient (current user) - confirmation
-      await emitToUserRoom(
-        "friendRequestAccepted",
-        currentUserData.clerkId,
-        {
-          request_id: requestId,
-          accepted_by: currentUserData.clerkId,
-          new_friend_id: requester.clerkId,
-          new_friend_name: requester.full_name,
-          new_friend_avatar: requester.avatar?.url || null,
-        }
-      );
+      await emitToUserRoom("friendRequestAccepted", currentUserData.clerkId, {
+        request_id: requestId,
+        accepted_by: currentUserData.clerkId,
+        new_friend_id: requester.clerkId,
+        new_friend_name: requester.full_name,
+        new_friend_avatar: requester.avatar?.url || null,
+      });
 
       // Update friend counts for both users
       const requesterFriendCount = await Friendship.countDocuments({
@@ -352,32 +365,20 @@ export async function respondToFriendRequest(
         ],
       });
 
-      await emitToUserRoom(
-        "friendCountUpdated",
-        requester.clerkId,
-        {
-          count: requesterFriendCount,
-        }
-      );
+      await emitToUserRoom("friendCountUpdated", requester.clerkId, {
+        count: requesterFriendCount,
+      });
 
-      await emitToUserRoom(
-        "friendCountUpdated",
-        currentUserData.clerkId,
-        {
-          count: recipientFriendCount,
-        }
-      );
+      await emitToUserRoom("friendCountUpdated", currentUserData.clerkId, {
+        count: recipientFriendCount,
+      });
     } else if (action === "decline") {
       // Emit to requester - their request was declined
-      await emitToUserRoom(
-        "friendRequestDeclined",
-        requester.clerkId,
-        {
-          request_id: requestId,
-          declined_by: currentUserData.clerkId,
-          declined_by_name: currentUserData.full_name,
-        }
-      );
+      await emitToUserRoom("friendRequestDeclined", requester.clerkId, {
+        request_id: requestId,
+        declined_by: currentUserData.clerkId,
+        declined_by_name: currentUserData.full_name,
+      });
     }
 
     // Update friend request counts for both users
@@ -391,21 +392,13 @@ export async function respondToFriendRequest(
       status: "pending",
     });
 
-    await emitToUserRoom(
-      "friendRequestCountUpdated",
-      requester.clerkId,
-      {
-        count: requesterRequestCount,
-      }
-    );
+    await emitToUserRoom("friendRequestCountUpdated", requester.clerkId, {
+      count: requesterRequestCount,
+    });
 
-    await emitToUserRoom(
-      "friendRequestCountUpdated",
-      currentUserData.clerkId,
-      {
-        count: recipientRequestCount,
-      }
-    );
+    await emitToUserRoom("friendRequestCountUpdated", currentUserData.clerkId, {
+      count: recipientRequestCount,
+    });
 
     const messages = {
       accept: "Friend request accepted",
@@ -604,7 +597,9 @@ export async function getUserProfile(
       full_name: targetUser.full_name,
       bio: canViewProfile ? targetUser.bio : undefined,
       avatar: targetUser.avatar?.url || null,
-      cover_photo: canViewProfile ? targetUser.cover_photo?.url || null : undefined,
+      cover_photo: canViewProfile
+        ? targetUser.cover_photo?.url || null
+        : undefined,
       location: canViewProfile ? targetUser.location : undefined,
       website: canViewProfile ? targetUser.website : undefined,
       is_online: targetUser.is_online,
@@ -805,14 +800,10 @@ export async function blockUser(
 
     // ===== SOCKET EVENTS =====
     // Emit to blocker (current user)
-    await emitToUserRoom(
-      "friendBlocked",
-      currentUserData.clerkId,
-      {
-        blocked_user_id: targetUser.clerkId,
-        blocked_user_name: targetUser.full_name,
-      }
-    );
+    await emitToUserRoom("friendBlocked", currentUserData.clerkId, {
+      blocked_user_id: targetUser.clerkId,
+      blocked_user_name: targetUser.full_name,
+    });
 
     // Update friend counts for both users
     const blockerFriendCount = await Friendship.countDocuments({
@@ -829,21 +820,13 @@ export async function blockUser(
       ],
     });
 
-    await emitToUserRoom(
-      "friendCountUpdated",
-      currentUserData.clerkId,
-      {
-        count: blockerFriendCount,
-      }
-    );
+    await emitToUserRoom("friendCountUpdated", currentUserData.clerkId, {
+      count: blockerFriendCount,
+    });
 
-    await emitToUserRoom(
-      "friendCountUpdated",
-      targetUser.clerkId,
-      {
-        count: blockedFriendCount,
-      }
-    );
+    await emitToUserRoom("friendCountUpdated", targetUser.clerkId, {
+      count: blockedFriendCount,
+    });
 
     return { success: true, message: "User blocked successfully" };
   } catch (error) {
@@ -893,14 +876,10 @@ export async function unblockUser(
 
     // ===== SOCKET EVENTS =====
     // Emit to unblocker (current user)
-    await emitToUserRoom(
-      "friendUnblocked",
-      currentUserData.clerkId,
-      {
-        unblocked_user_id: targetUser?.clerkId,
-        unblocked_user_name: targetUser?.full_name,
-      }
-    );
+    await emitToUserRoom("friendUnblocked", currentUserData.clerkId, {
+      unblocked_user_id: targetUser?.clerkId,
+      unblocked_user_name: targetUser?.full_name,
+    });
 
     return { success: true, message: "User unblocked successfully" };
   } catch (error) {
@@ -1038,10 +1017,10 @@ export async function hasBlockedUser(
 export async function getFriendRequests(
   clerkId: string,
   params: GetFriendRequestsDto
-): Promise<{ 
-  requests: FriendRequestDto[]; 
+): Promise<{
+  requests: FriendRequestDto[];
   sentRequests?: FriendRequestDto[];
-  totalCount: number 
+  totalCount: number;
 }> {
   try {
     if (!clerkId) throw new Error("Unauthorized");
@@ -1211,15 +1190,11 @@ export async function cancelFriendRequest(
 
     // ===== SOCKET EVENTS =====
     // Emit to recipient - request was cancelled
-    await emitToUserRoom(
-      "friendRequestCancelled",
-      recipient.clerkId,
-      {
-        request_id: requestId,
-        cancelled_by: currentUserData.clerkId,
-        cancelled_by_name: currentUserData.full_name,
-      }
-    );
+    await emitToUserRoom("friendRequestCancelled", recipient.clerkId, {
+      request_id: requestId,
+      cancelled_by: currentUserData.clerkId,
+      cancelled_by_name: currentUserData.full_name,
+    });
 
     // Update friend request counts
     const requesterRequestCount = await Friendship.countDocuments({
@@ -1232,21 +1207,13 @@ export async function cancelFriendRequest(
       status: "pending",
     });
 
-    await emitToUserRoom(
-      "friendRequestCountUpdated",
-      currentUserData.clerkId,
-      {
-        count: requesterRequestCount,
-      }
-    );
+    await emitToUserRoom("friendRequestCountUpdated", currentUserData.clerkId, {
+      count: requesterRequestCount,
+    });
 
-    await emitToUserRoom(
-      "friendRequestCountUpdated",
-      recipient.clerkId,
-      {
-        count: recipientRequestCount,
-      }
-    );
+    await emitToUserRoom("friendRequestCountUpdated", recipient.clerkId, {
+      count: recipientRequestCount,
+    });
 
     return { success: true, message: "Friend request cancelled" };
   } catch (error) {
@@ -1282,8 +1249,16 @@ export async function removeFriend(
     // Find and delete the friendship
     const friendship = await Friendship.findOneAndDelete({
       $or: [
-        { requester: currentUserData._id, recipient: friendId, status: "accepted" },
-        { requester: friendId, recipient: currentUserData._id, status: "accepted" },
+        {
+          requester: currentUserData._id,
+          recipient: friendId,
+          status: "accepted",
+        },
+        {
+          requester: friendId,
+          recipient: currentUserData._id,
+          status: "accepted",
+        },
       ],
     });
 
@@ -1293,24 +1268,16 @@ export async function removeFriend(
 
     // ===== SOCKET EVENTS =====
     // Emit to removed friend
-    await emitToUserRoom(
-      "friendRemoved",
-      friendUser.clerkId,
-      {
-        removed_by: currentUserData.clerkId,
-        removed_by_name: currentUserData.full_name,
-      }
-    );
+    await emitToUserRoom("friendRemoved", friendUser.clerkId, {
+      removed_by: currentUserData.clerkId,
+      removed_by_name: currentUserData.full_name,
+    });
 
     // Emit to remover (current user)
-    await emitToUserRoom(
-      "friendRemoved",
-      currentUserData.clerkId,
-      {
-        removed_user_id: friendUser.clerkId,
-        removed_user_name: friendUser.full_name,
-      }
-    );
+    await emitToUserRoom("friendRemoved", currentUserData.clerkId, {
+      removed_user_id: friendUser.clerkId,
+      removed_user_name: friendUser.full_name,
+    });
 
     // Update friend counts for both users
     const removerFriendCount = await Friendship.countDocuments({
@@ -1327,21 +1294,13 @@ export async function removeFriend(
       ],
     });
 
-    await emitToUserRoom(
-      "friendCountUpdated",
-      currentUserData.clerkId,
-      {
-        count: removerFriendCount,
-      }
-    );
+    await emitToUserRoom("friendCountUpdated", currentUserData.clerkId, {
+      count: removerFriendCount,
+    });
 
-    await emitToUserRoom(
-      "friendCountUpdated",
-      friendUser.clerkId,
-      {
-        count: removedFriendCount,
-      }
-    );
+    await emitToUserRoom("friendCountUpdated", friendUser.clerkId, {
+      count: removedFriendCount,
+    });
 
     return { success: true, message: "Friend removed successfully" };
   } catch (error) {
@@ -1389,14 +1348,10 @@ export async function notifyFriendStatusChange(
           ? (friendship as any).recipient.clerkId
           : (friendship as any).requester.clerkId;
 
-      await emitToUserRoom(
-        "friendStatusChanged",
-        friendClerkId,
-        {
-          friend_id: currentUserData.clerkId,
-          status,
-        }
-      );
+      await emitToUserRoom("friendStatusChanged", friendClerkId, {
+        friend_id: currentUserData.clerkId,
+        status,
+      });
     }
 
     return { success: true };

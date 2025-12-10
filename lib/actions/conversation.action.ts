@@ -7,7 +7,7 @@ import { CreateConversationDTO, UpdateConversationDTO } from "@/dtos/conversatio
 import User from "@/database/user.model";
 import Conversation from "@/database/conversation.model";
 import Message from "@/database/message.model";
-import { deleteFileFromCloudinary, uploadFileToCloudinary } from "./file.action";
+import { deleteFileFromCloud, uploadFileToCloud } from "./file.action";
 import File from "@/database/file.model";
 import { emitToUserRoom } from "../socket.helper";
 
@@ -932,13 +932,15 @@ export async function deleteConversation(conversationId: string) {
 }
 
 async function populateConversation(conversation: any) {
-  return await Conversation.populate(conversation, [
+  // Step 1: Populate all references
+  const populated = await Conversation.populate(conversation, [
     {
       path: 'participants',
       select: 'clerkId full_name username avatar is_online last_seen',
       populate: {
         path: 'avatar',
-        select: 'url name type'
+        select: 'url name type',
+        model: 'File'
       }
     },
     {
@@ -949,21 +951,103 @@ async function populateConversation(conversation: any) {
           select: 'clerkId full_name username avatar',
           populate: {
             path: 'avatar',
-            select: 'url name type'
+            select: 'url name type',
+            model: 'File'
           }
         },
         {
           path: 'attachments',
-          select: 'url name type size'
+          select: 'url name type size',
+          model: 'File'
         }
       ]
     },
     {
       path: 'avatar',
-      select: 'url name type'
+      select: 'url name type',
+      model: 'File'
     }
   ]);
+
+  // ✅ Step 2: Transform ALL avatar objects to string URLs
+  const transformedConversation: any = {
+    _id: populated._id,
+    type: populated.type,
+    name: populated.name,
+    description: populated.description,
+    is_pinned: populated.is_pinned,
+    is_archived: populated.is_archived,
+    last_activity: populated.last_activity,
+    created_at: populated.created_at || populated.createdAt,
+    updated_at: populated.updated_at || populated.updatedAt,
+    
+    // ✅ Transform conversation avatar: object → string URL
+    avatar: populated.avatar?.url || null,
+    
+    // ✅ Transform participants with avatars
+    participants: (populated.participants || []).map((p: any) => ({
+      _id: p._id,
+      clerkId: p.clerkId,
+      full_name: p.full_name,
+      username: p.username,
+      is_online: p.is_online,
+      last_seen: p.last_seen,
+      avatar: p.avatar?.url || null  // ← Transform to string URL
+    })),
+    
+    // ✅ Transform last_message with sender avatar
+    last_message: populated.last_message ? {
+      _id: populated.last_message._id,
+      content: populated.last_message.content,
+      encrypted_content: populated.last_message.encrypted_content,
+      type: populated.last_message.message_type || populated.last_message.type || 'text',
+      message_type: populated.last_message.message_type || populated.last_message.type || 'text',
+      is_edited: populated.last_message.is_edited || false,
+      created_at: populated.last_message.created_at || populated.last_message.createdAt,
+      updated_at: populated.last_message.updated_at || populated.last_message.updatedAt,
+      
+      // ✅ Transform sender with avatar
+      sender: populated.last_message.sender ? {
+        _id: populated.last_message.sender._id,
+        clerkId: populated.last_message.sender.clerkId,
+        full_name: populated.last_message.sender.full_name,
+        username: populated.last_message.sender.username,
+        avatar: populated.last_message.sender.avatar?.url || null  // ← Transform to string URL
+      } : null,
+      
+      // Attachments already have url field from File model
+      attachments: (populated.last_message.attachments || []).map((att: any) => ({
+        _id: att._id,
+        url: att.url,
+        name: att.name,
+        type: att.type,
+        size: att.size
+      }))
+    } : null,
+    
+    // Additional fields if exist
+    created_by: populated.created_by,
+    admin: populated.admin,
+    unreadCount: populated.unreadCount || 0,
+  };
+
+  // ✅ Debug logging
+  console.log('✅ [populateConversation] Transformed:', {
+    id: transformedConversation._id,
+    type: transformedConversation.type,
+    avatar: transformedConversation.avatar,
+    avatarType: typeof transformedConversation.avatar,
+    participantsCount: transformedConversation.participants?.length,
+    participants: transformedConversation.participants?.map((p: any) => ({
+      name: p.full_name,
+      avatar: p.avatar,
+      avatarType: typeof p.avatar,
+    }))
+  });
+
+  return transformedConversation;
 }
+
 
 
 export async function getConversationMedia(
@@ -1409,11 +1493,11 @@ export async function updateGroupAvatar(
       throw new Error('Only admin can update group avatar');
     }
 
-    const uploadResult = await uploadFileToCloudinary(
+    const uploadResult = await uploadFileToCloud(
       avatarFile,
       'chatapp/group-avatars',
       userId
-    );
+    )
 
     if (!uploadResult.success || !uploadResult.file) {
       throw new Error(uploadResult.error || 'Failed to upload avatar');
@@ -1422,7 +1506,7 @@ export async function updateGroupAvatar(
     if (conversation.avatar) {
       const oldAvatarId = conversation.avatar.toString();
       try {
-        await deleteFileFromCloudinary(oldAvatarId);
+        await deleteFileFromCloud(oldAvatarId);
       } catch (error) {
         console.warn('Failed to delete old avatar:', error);
       }

@@ -7,13 +7,308 @@ import Call from "@/database/call.model";
 import Conversation from "@/database/conversation.model";
 import User from "@/database/user.model";
 import EmotionAnalysis from "@/database/emotion-analysis.model";
-import { emitToUserRoom } from "@/lib/socket.helper";
+import { emitSocketEvent, emitToUserRoom } from "@/lib/socket.helper";
 import { clerkClient } from "@clerk/nextjs/server";
 import HuggingFaceService from "@/lib/services/huggingface.service";
 import { uploadFileToCloudinary } from "./file.action";
+import PushToken from "@/database/push-token.model";
+import { sendCallNotification as sendFCMCallNotification, isValidFCMToken } from '../services/fcm.service';
+import { sendCallNotification as sendExpoCallNotification } from '../pushNotification';
+
+import Message from "@/database/message.model";
 
 /**
- * Initiate a new call
+ * ⭐ UPDATED: Create call log message with different statuses
+ */
+async function createCallLogMessage(params: {
+  conversationId: string;
+  callId: string;
+  callerId: string;
+  type: "audio" | "video";
+  status: "ongoing" | "ended" | "rejected" | "missed";
+  duration?: number;
+  participants?: string[];
+}) {
+  try {
+    console.log("🔔 ========== CREATE CALL LOG MESSAGE ==========");
+    console.log("📋 Params:", params);
+
+    const { conversationId, callId, callerId, type, status, duration, participants } = params;
+
+    await connectToDatabase();
+
+    const caller = await User.findOne({ clerkId: callerId });
+    if (!caller) {
+      console.error("❌ Caller not found:", callerId);
+      throw new Error("Caller not found");
+    }
+    console.log("✅ Caller found:", { id: caller._id, name: caller.full_name });
+
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      console.error("❌ Conversation not found:", conversationId);
+      throw new Error("Conversation not found");
+    }
+    console.log("✅ Conversation found:", { 
+      id: conversation._id, 
+      type: conversation.type,
+      name: conversation.name 
+    });
+
+    const isGroup = conversation.type === "group";
+    console.log("🔍 Is group call:", isGroup);
+
+    // ⭐ CASE 1: Group call
+    if (isGroup) {
+      console.log("📱 Processing GROUP CALL message");
+
+      let content = "";
+      let metadata: any = {
+        isSystemMessage: true,
+        action: "call_log",
+        call_id: callId,
+        call_type: type,
+        caller_id: callerId,
+        caller_name: caller.full_name,
+        participants: participants || [],
+      };
+
+      if (status === "ongoing") {
+        content = `📞 ${caller.full_name} started a ${type} call`;
+        metadata.call_status = "ongoing";
+      } else if (status === "rejected") {
+        content = `📞 Group call was declined`;
+        metadata.call_status = "rejected";
+      } else if (status === "missed") {
+        content = `📞 Missed group call from ${caller.full_name}`;
+        metadata.call_status = "missed";
+      } else {
+        // ended
+        const durationText = duration && duration > 0
+          ? duration < 60
+            ? `${duration} seconds`
+            : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
+          : "Less than a second";
+
+        content = `📞 Group call ended - Duration: ${durationText}`;
+        metadata.call_status = "ended";
+        metadata.duration = duration || 0;
+      }
+
+      console.log("📝 Creating group call message:", content);
+
+      if (status === "ongoing") {
+        // Create new message
+        const message = await Message.create({
+          conversation: conversationId,
+          sender: caller._id,
+          content,
+          type: "text",
+          metadata,
+        });
+
+        console.log("✅ Message CREATED:", message._id);
+
+        await emitSocketEvent(
+          "newMessage",
+          conversationId,
+          {
+            message_id: message._id.toString(),
+            conversation_id: conversationId,
+            sender_id: callerId,
+            sender_name: caller.full_name,
+            message_content: content,
+            message_type: "text",
+            message: {
+              _id: message._id.toString(),
+              conversation: conversationId,
+              sender: {
+                clerkId: callerId,
+                full_name: caller.full_name,
+                username: caller.username,
+                avatar: (caller.avatar as any)?.url,
+              },
+              content,
+              type: "text",
+              metadata,
+              attachments: [],
+              reactions: [],
+              is_edited: false,
+              read_by: [],
+              created_at: new Date(),
+              updated_at: new Date(),
+            },
+          },
+          true
+        );
+
+        console.log("✅ newMessage emitted");
+        return message._id.toString();
+      } else {
+        // Update existing message or create new one
+        const existingMessage = await Message.findOne({
+          conversation: conversationId,
+          "metadata.call_id": callId,
+          "metadata.call_status": "ongoing",
+        });
+
+        if (existingMessage) {
+          console.log("✅ Updating existing message");
+          
+          existingMessage.content = content;
+          existingMessage.metadata = metadata;
+          await existingMessage.save();
+
+          await emitSocketEvent("updateMessage", conversationId, {
+            message_id: existingMessage._id.toString(),
+            user_id: callerId,
+            new_content: content,
+            metadata,
+            edited_at: new Date(),
+          });
+
+          return existingMessage._id.toString();
+        } else {
+          console.log("✅ Creating new message");
+          
+          const message = await Message.create({
+            conversation: conversationId,
+            sender: caller._id,
+            content,
+            type: "text",
+            metadata,
+          });
+
+          await emitSocketEvent(
+            "newMessage",
+            conversationId,
+            {
+              message_id: message._id.toString(),
+              conversation_id: conversationId,
+              sender_id: callerId,
+              sender_name: caller.full_name,
+              message_content: content,
+              message_type: "text",
+              message: {
+                _id: message._id.toString(),
+                conversation: conversationId,
+                sender: {
+                  clerkId: callerId,
+                  full_name: caller.full_name,
+                  username: caller.username,
+                  avatar: (caller.avatar as any)?.url,
+                },
+                content,
+                type: "text",
+                metadata,
+                attachments: [],
+                reactions: [],
+                is_edited: false,
+                read_by: [],
+                created_at: new Date(),
+                updated_at: new Date(),
+              },
+            },
+            true
+          );
+
+          return message._id.toString();
+        }
+      }
+    } else {
+      // ⭐ CASE 2: Private call
+      console.log("📱 Processing PRIVATE CALL message");
+      
+      let content = "";
+      const callTypeText = type === "video" ? "Video" : "Audio";
+      
+      if (status === "rejected") {
+        content = `📞 ${callTypeText} call was declined`;
+      } else if (status === "missed") {
+        content = `📞 Missed ${callTypeText.toLowerCase()} call`;
+      } else {
+        // ended
+        const durationText = duration && duration > 0
+          ? duration < 60
+            ? `${duration} seconds`
+            : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
+          : "Less than a second";
+
+        content = `📞 ${callTypeText} call ended - Duration: ${durationText}`;
+      }
+
+      const metadata = {
+        isSystemMessage: true,
+        action: "call_log",
+        call_id: callId,
+        call_type: type,
+        call_status: status,
+        caller_id: callerId,
+        caller_name: caller.full_name,
+        duration: duration || 0,
+      };
+
+      console.log("📝 Creating private call message:", content);
+
+      const message = await Message.create({
+        conversation: conversationId,
+        sender: caller._id,
+        content,
+        type: "text",
+        metadata,
+      });
+
+      console.log("✅ Message CREATED:", message._id);
+
+      await emitSocketEvent(
+        "newMessage",
+        conversationId,
+        {
+          message_id: message._id.toString(),
+          conversation_id: conversationId,
+          sender_id: callerId,
+          sender_name: caller.full_name,
+          message_content: content,
+          message_type: "text",
+          message: {
+            _id: message._id.toString(),
+            conversation: conversationId,
+            sender: {
+              clerkId: callerId,
+              full_name: caller.full_name,
+              username: caller.username,
+              avatar: (caller.avatar as any)?.url,
+            },
+            content,
+            type: "text",
+            metadata,
+            attachments: [],
+            reactions: [],
+            is_edited: false,
+            read_by: [],
+            created_at: new Date(),
+            updated_at: new Date(),
+          },
+        },
+        true
+      );
+
+      console.log("✅ newMessage emitted");
+      return message._id.toString();
+    }
+
+    console.log("🔔 ========== CREATE CALL LOG MESSAGE COMPLETED ==========");
+    return null;
+  } catch (error) {
+    console.error("❌ ========== CREATE CALL LOG MESSAGE FAILED ==========");
+    console.error("❌ Error:", error);
+    return null;
+  }
+}
+
+
+/**
+ * Initiate a new call - WITH FCM SUPPORT
  */
 export async function initiateCall(params: {
   userId: string;
@@ -25,41 +320,50 @@ export async function initiateCall(params: {
 
     await connectToDatabase();
 
-    // Find caller in database
-    const callerUser = await User.findOne({ clerkId: userId });
+    const callerUser = await User.findOne({ clerkId: userId }).populate("avatar");
     if (!callerUser) {
       throw new Error("User not found in database");
     }
 
-    // Find conversation
-    const conversation = await Conversation.findById(conversationId).populate(
-      "participants",
-      "clerkId full_name avatar _id"
-    );
+    const conversation = await Conversation.findById(conversationId)
+      .populate({
+        path: "participants",
+        select: "clerkId full_name username avatar _id",
+        populate: {
+          path: "avatar",
+          select: "url publicId"
+        }
+      })
+      .populate({
+        path: "avatar",
+        select: "url publicId"
+      });
 
     if (!conversation) {
       throw new Error("Conversation not found");
     }
 
-    // Validate personal call participants
-    if (conversation.type === "private" && conversation.participants.length !== 2) {
+    if (!conversation.participants || conversation.participants.length === 0) {
+      throw new Error("Conversation has no participants");
+    }
+
+    if (
+      conversation.type === "private" &&
+      conversation.participants.length !== 2
+    ) {
       throw new Error("Personal calls must have exactly 2 participants");
     }
 
-    // Get caller info from Clerk
     const clerk = await clerkClient();
-    const caller = await clerk.users.getUser(userId);
+    const clerkCaller = await clerk.users.getUser(userId);
 
-    // Generate channel name
     const channelName = `call_${conversationId}_${Date.now()}`;
 
-    // Prepare participants
     const participants = conversation.participants.map((p: any) => ({
       user: p._id,
       joinedAt: new Date(),
     }));
 
-    // Create call
     const call = await Call.create({
       conversation: conversationId,
       caller: callerUser._id,
@@ -71,35 +375,138 @@ export async function initiateCall(params: {
     });
 
     console.log(`📞 Call initiated: ${call._id} by ${callerUser._id}`);
-    console.log(`👥 Total participants:`, participants.length);
 
-    // Filter out caller from notification recipients
+    // Create "Call in progress" message for GROUP calls
+    if (conversation.type === "group") {
+      await createCallLogMessage({
+        conversationId,
+        callId: call._id.toString(),
+        callerId: userId,
+        type,
+        status: "ongoing",
+        participants: participants.map(p => p.user.toString()),
+      });
+    }
+
     const otherParticipants = conversation.participants.filter(
       (p: any) => p.clerkId !== userId
     );
 
-    console.log(
-      `📤 Sending incoming call to ${otherParticipants.length} participants (excluding caller)`
-    );
+    const callerName = callerUser.full_name || 
+                       `${clerkCaller.firstName || ""} ${clerkCaller.lastName || ""}`.trim() || 
+                       callerUser.username || 
+                       "Unknown User";
+    
+    const callerAvatar = (callerUser.avatar as any)?.url || 
+                         clerkCaller.imageUrl || 
+                         "";
 
-    // Prepare call data for notification
+    let displayName = "";
+    let displayAvatar = "";
+
+    if (conversation.type === "private") {
+      displayName = callerName;
+      displayAvatar = callerAvatar;
+    } else {
+      displayName = conversation.name || "Group Call";
+      if (conversation.avatar && typeof conversation.avatar === "object") {
+        displayAvatar = (conversation.avatar as any).url || "";
+      }
+    }
+
     const callData = {
       call_id: call._id.toString(),
       caller_id: userId,
-      caller_name: caller.firstName + " " + caller.lastName,
-      caller_avatar: caller.imageUrl,
+      caller_name: callerName,
+      caller_avatar: callerAvatar,
       call_type: type,
       conversation_id: conversationId,
       channel_name: channelName,
+      conversation_type: conversation.type,
+      display_name: displayName,
+      display_avatar: displayAvatar,
     };
 
-    // Emit incoming call to each participant
+    // Emit socket event (for app already running)
     for (const participant of otherParticipants) {
-      console.log(`📞 Emitting incomingCall to user room: user:${participant.clerkId}`);
+      if (!participant.clerkId) continue;
       await emitToUserRoom("incomingCall", participant.clerkId, callData);
     }
 
-    console.log(`✅ Incoming call sent to ${otherParticipants.length} participants`);
+    // ⭐ UPDATED: Send push notifications with FCM/Expo detection
+    try {
+      const notificationData = {
+        callerName: displayName,
+        callType: type,
+        callId: call._id.toString(),
+        channelName,
+        conversationId,
+        callerId: userId,
+        callerAvatar: displayAvatar,
+        conversationType: conversation.type,
+        conversationName: conversation.name || displayName,
+        conversationAvatar: displayAvatar,
+        participantsCount: call.participants.length - 1,
+      };
+
+      for (const participant of otherParticipants) {
+        if (!participant.clerkId) continue;
+
+        const participantUser = await User.findOne({
+          clerkId: participant.clerkId,
+        });
+
+        if (!participantUser) {
+          console.log(`⚠️ User not found: ${participant.clerkId}`);
+          continue;
+        }
+
+        const pushTokenDoc = await PushToken.findOne({
+          user: participantUser._id,
+          is_active: true,
+        }).sort({ last_used: -1 });
+
+        if (!pushTokenDoc?.token) {
+          console.log(`⚠️ No push token for user: ${participant.clerkId}`);
+          continue;
+        }
+
+        let ticket;
+        const token = pushTokenDoc.token;
+
+        // ⭐ Detect token type and send appropriate notification
+        if (isValidFCMToken(token)) {
+          // ✅ FCM Token - Use Firebase Admin SDK (full-screen on Android)
+          console.log(`📱 Sending FCM notification to ${participant.clerkId}`);
+          
+          ticket = await sendFCMCallNotification({
+            fcmToken: token,
+            ...notificationData,
+          });
+
+          console.log(`✅ FCM sent:`, ticket);
+        } else {
+          // ✅ Expo Token - Use Expo Push Service (iOS/Expo Go)
+          console.log(`📱 Sending Expo notification to ${participant.clerkId}`);
+          
+          ticket = await sendExpoCallNotification({
+            pushToken: token,
+            ...notificationData,
+          });
+
+          console.log(`✅ Expo sent:`, ticket);
+        }
+
+        if (ticket?.status === "ok") {
+          console.log(`✅ Call notification delivered to ${participant.clerkId}`);
+        } else {
+          console.error(`❌ Failed to send notification to ${participant.clerkId}:`, ticket);
+        }
+      }
+    } catch (notifError) {
+      console.error("⚠️ Failed to send call notifications:", notifError);
+      // Don't throw - call should still work via socket
+    }
 
     return {
       success: true,
@@ -112,8 +519,8 @@ export async function initiateCall(params: {
       },
       caller: {
         id: userId,
-        name: caller.firstName + " " + caller.lastName,
-        avatar: caller.imageUrl,
+        name: callerName,
+        avatar: callerAvatar,
       },
     };
   } catch (error: any) {
@@ -121,6 +528,8 @@ export async function initiateCall(params: {
     throw new Error(error.message || "Failed to initiate call");
   }
 }
+
+
 
 /**
  * Answer a call
@@ -131,13 +540,11 @@ export async function answerCall(params: { userId: string; callId: string }) {
 
     await connectToDatabase();
 
-    // Find MongoDB User from clerkId
     const mongoUser = await User.findOne({ clerkId: userId });
     if (!mongoUser) {
       throw new Error("User not found in database");
     }
 
-    // Find call and populate conversation
     const call = await Call.findById(callId).populate({
       path: "conversation",
       populate: {
@@ -150,22 +557,19 @@ export async function answerCall(params: { userId: string; callId: string }) {
       throw new Error("Call not found");
     }
 
-    // Allow joining if call is ringing OR ongoing (for group calls)
     if (call.status !== "ringing" && call.status !== "ongoing") {
       throw new Error(`Call has ${call.status}`);
     }
 
-    // Get user info from Clerk
     const clerk = await clerkClient();
     const clerkUser = await clerk.users.getUser(userId);
 
-    // Check if user already in call
     const userAlreadyInCall = call.participants.some(
       (p: any) => p.user.toString() === mongoUser._id.toString()
     );
 
     if (userAlreadyInCall) {
-      console.log(`📞 User ${userId} already in call, returning existing data`);
+      console.log(`📞 User ${userId} already in call`);
       return {
         success: true,
         channelName: call.channelName,
@@ -175,25 +579,17 @@ export async function answerCall(params: { userId: string; callId: string }) {
       };
     }
 
-    // Add user to participants
     call.participants.push({
       user: mongoUser._id,
       joinedAt: new Date(),
     });
 
-    // Update status to "ongoing" only if currently "ringing"
     if (call.status === "ringing") {
       call.status = "ongoing";
     }
 
     await call.save();
 
-    console.log(
-      `📞 User joined call: ${call._id} - User: ${userId} (MongoDB: ${mongoUser._id})`
-    );
-    console.log(`👥 Total participants in call: ${call.participants.length}`);
-
-    // Prepare call answered data
     const callAnsweredData = {
       call_id: call._id.toString(),
       answered_by: userId,
@@ -204,23 +600,17 @@ export async function answerCall(params: { userId: string; callId: string }) {
       total_participants: call.participants.length,
     };
 
-    // Emit callAnswered to all participants (except the one who answered)
     const conversation = call.conversation as any;
     if (conversation && conversation.participants) {
-      console.log(
-        `📤 Emitting callAnswered to ${conversation.participants.length} conversation members`
-      );
-
       for (const participant of conversation.participants) {
-        // Skip the person who just answered
         if (participant.clerkId === userId) continue;
-
-        console.log(`📞 Sending callAnswered to user: ${participant.clerkId}`);
-        await emitToUserRoom("callAnswered", participant.clerkId, callAnsweredData);
+        await emitToUserRoom(
+          "callAnswered",
+          participant.clerkId,
+          callAnsweredData
+        );
       }
     }
-
-    console.log(`✅ User joined call successfully, notification sent to all participants`);
 
     return {
       success: true,
@@ -244,13 +634,11 @@ export async function rejectCall(params: { userId: string; callId: string }) {
 
     await connectToDatabase();
 
-    // Find MongoDB User from clerkId
     const mongoUser = await User.findOne({ clerkId: userId });
     if (!mongoUser) {
       throw new Error("User not found in database");
     }
 
-    // Find call and populate conversation
     const call = await Call.findById(callId).populate({
       path: "conversation",
       populate: {
@@ -263,23 +651,17 @@ export async function rejectCall(params: { userId: string; callId: string }) {
       throw new Error("Call not found");
     }
 
-    // Get conversation info
     const conversation = call.conversation as any;
     const isGroupCall = conversation.type === "group";
 
-    // Get user info from Clerk
     const clerk = await clerkClient();
     const clerkUser = await clerk.users.getUser(userId);
 
     if (isGroupCall) {
-      // GROUP CALL: Only reject for self, don't end call for others
       if (call.status !== "ringing" && call.status !== "ongoing") {
         throw new Error(`Call has already ${call.status}`);
       }
 
-      console.log(`📞 User ${userId} rejected group call: ${call._id}`);
-
-      // Only notify this user that they rejected
       const callRejectedData = {
         call_id: call._id.toString(),
         rejected_by: userId,
@@ -289,10 +671,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
         rejection_type: "personal",
       };
 
-      // Only emit to this user to hide incoming call dialog
       await emitToUserRoom("callRejected", userId, callRejectedData);
-
-      console.log(`✅ User ${userId} rejected group call notification sent`);
 
       return {
         success: true,
@@ -301,20 +680,15 @@ export async function rejectCall(params: { userId: string; callId: string }) {
         message: "You rejected the call, but it continues for others",
       };
     } else {
-      // PERSONAL CALL: Reject will end call for everyone
       if (call.status !== "ringing") {
         throw new Error(`Call is already ${call.status}`);
       }
 
-      // Update call status
       call.status = "rejected";
       call.endedAt = new Date();
       call.endedBy = mongoUser._id;
       await call.save();
 
-      console.log(`📞 Personal call rejected: ${call._id} by ${userId}`);
-
-      // Prepare call rejected data
       const callRejectedData = {
         call_id: call._id.toString(),
         rejected_by: userId,
@@ -324,19 +698,15 @@ export async function rejectCall(params: { userId: string; callId: string }) {
         rejection_type: "full",
       };
 
-      // Emit callRejected to all participants
       if (conversation && conversation.participants) {
-        console.log(
-          `📤 Emitting callRejected to ${conversation.participants.length} participants`
-        );
-
         for (const participant of conversation.participants) {
-          console.log(`📞 Sending callRejected to user: ${participant.clerkId}`);
-          await emitToUserRoom("callRejected", participant.clerkId, callRejectedData);
+          await emitToUserRoom(
+            "callRejected",
+            participant.clerkId,
+            callRejectedData
+          );
         }
       }
-
-      console.log(`✅ Personal call rejected notification sent to all participants`);
 
       return {
         success: true,
@@ -351,7 +721,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
 }
 
 /**
- * End a call (ENHANCED WITH EMOTION ANALYSIS TRIGGER)
+ * ⭐ FINAL FIX: End a call - Caller creates message even if already ended/rejected/missed
  */
 export async function endCall(params: {
   userId: string;
@@ -359,17 +729,17 @@ export async function endCall(params: {
   duration?: number;
 }) {
   try {
+    console.log("🔔 ========== END CALL STARTED ==========");
+    console.log("📋 Params:", params);
+
     const { userId, callId, duration } = params;
 
     await connectToDatabase();
-
-    // Find MongoDB User from clerkId
     const mongoUser = await User.findOne({ clerkId: userId });
     if (!mongoUser) {
       throw new Error("User not found in database");
     }
 
-    // Find call and populate conversation
     const call = await Call.findById(callId).populate({
       path: "conversation",
       populate: {
@@ -382,69 +752,108 @@ export async function endCall(params: {
       throw new Error("Call not found");
     }
 
-    // Check if call is already ended
-    if (call.status === "ended") {
-      return {
-        success: true,
-        message: "Call already ended",
-        duration: call.duration || 0,
-      };
+    console.log("✅ Call found:", {
+      callId: call._id,
+      status: call.status,
+      callerId: call.caller,
+      currentUserId: mongoUser._id,
+      isCaller: call.caller.toString() === mongoUser._id.toString(),
+    });
+
+    const isCaller = call.caller.toString() === mongoUser._id.toString();
+    const conversation = call.conversation as any;
+    
+    // ⭐ Check if message already exists
+    const existingCallLogMessage = await Message.findOne({
+      conversation: conversation._id,
+      "metadata.call_id": callId,
+      "metadata.action": "call_log",
+    });
+
+    console.log("🔍 Existing message:", existingCallLogMessage ? "FOUND" : "NOT FOUND");
+
+    // ⭐ Determine call outcome based on CURRENT status
+    let callOutcome: "ended" | "rejected" | "missed" = "ended";
+    let previousStatus = call.status;
+    
+    if (call.status === "rejected") {
+      callOutcome = "rejected";
+    } else if (call.status === "ringing") {
+      callOutcome = "missed";
+    } else if (call.status === "ongoing") {
+      callOutcome = "ended";
+    } else if (call.status === "ended" || call.status === "missed") {
+      // Already ended/missed, determine outcome from stored data
+      callOutcome = call.status === "missed" ? "missed" : "ended";
     }
 
-    // Get user info from Clerk
+    console.log("📊 Call outcome:", callOutcome, "Previous status:", previousStatus);
+
     const clerk = await clerkClient();
     const clerkUser = await clerk.users.getUser(userId);
 
-    // Calculate duration if not provided
-    let callDuration = duration;
+    let callDuration = duration || call.duration;
     if (!callDuration && call.startedAt) {
-      const endTime = new Date();
+      const endTime = call.endedAt || new Date();
       const startTime = new Date(call.startedAt);
-      callDuration = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+      callDuration = Math.floor(
+        (endTime.getTime() - startTime.getTime()) / 1000
+      );
+    }
+    console.log("⏱️ Call duration:", callDuration);
+
+    // ⭐ Update call status if not already finalized
+    if (call.status !== "ended" && call.status !== "rejected" && call.status !== "missed") {
+      call.status = callOutcome === "missed" ? "missed" : callOutcome === "rejected" ? "rejected" : "ended";
+      call.endedAt = new Date();
+      call.endedBy = mongoUser._id;
+      if (callDuration) {
+        call.duration = callDuration;
+      }
+      await call.save();
+      console.log(`✅ Call status updated to '${call.status}'`);
+    } else {
+      console.log(`ℹ️ Call already in final state: ${call.status}`);
     }
 
-    // Update call status
-    call.status = "ended";
-    call.endedAt = new Date();
-    call.endedBy = mongoUser._id;
-    if (callDuration) {
-      call.duration = callDuration;
+    // ⭐ CRITICAL FIX: Caller creates message if it doesn't exist
+    if (isCaller && !existingCallLogMessage) {
+      console.log(`📝 Creating call log message (caller, outcome: ${callOutcome})...`);
+
+      const messageId = await createCallLogMessage({
+        conversationId: conversation._id.toString(),
+        callId: call._id.toString(),
+        callerId: userId,
+        type: call.type,
+        status: callOutcome,
+        duration: callDuration,
+        participants: call.participants.map((p: any) => p.user.toString()),
+      });
+
+      console.log("✅ Call log message created:", messageId);
+    } else if (!isCaller) {
+      console.log("ℹ️ User is not caller, skipping message creation");
+    } else if (existingCallLogMessage) {
+      console.log("ℹ️ Message already exists, skipping creation");
     }
-    await call.save();
 
-    console.log(
-      `📞 Call ended: ${call._id} by ${userId} (MongoDB: ${mongoUser._id}), duration: ${callDuration}s`
-    );
-
-    // Prepare call ended data
     const callEndedData = {
       call_id: call._id.toString(),
       ended_by: userId,
       ended_by_name: clerkUser.firstName + " " + clerkUser.lastName,
       ended_by_avatar: clerkUser.imageUrl,
       duration: callDuration || 0,
-      status: "ended",
+      status: call.status,
     };
 
-    // Emit callEnded to all participants
-    const conversation = call.conversation as any;
     if (conversation && conversation.participants) {
-      console.log(
-        `📤 Emitting callEnded to ${conversation.participants.length} participants`
-      );
-
+      console.log(`📤 Emitting callEnded to ${conversation.participants.length} participants`);
       for (const participant of conversation.participants) {
-        console.log(`📞 Sending callEnded to user: ${participant.clerkId}`);
         await emitToUserRoom("callEnded", participant.clerkId, callEndedData);
       }
     }
 
-    console.log(`✅ Call ended notification sent to all participants`);
-
-    // ⭐ NEW: Notify participants to upload recordings for emotion analysis
     if (conversation && conversation.participants) {
-      console.log(`🎯 Requesting emotion analysis recordings from participants...`);
-      
       for (const participant of conversation.participants) {
         await emitToUserRoom("requestCallRecording", participant.clerkId, {
           call_id: call._id.toString(),
@@ -455,10 +864,11 @@ export async function endCall(params: {
       }
     }
 
+    console.log("🔔 ========== END CALL COMPLETED ==========");
     return {
       success: true,
-      duration: call.duration || 0,
-      status: "ended",
+      duration: call.duration || callDuration || 0,
+      status: call.status,
       callId: call._id.toString(),
     };
   } catch (error: any) {
@@ -466,6 +876,7 @@ export async function endCall(params: {
     throw new Error(error.message || "Failed to end call");
   }
 }
+
 
 export async function processCallRecording(params: {
   userId: string;
@@ -475,7 +886,8 @@ export async function processCallRecording(params: {
   recordingDuration?: number;
 }) {
   try {
-    const { userId, callId, audioBuffer, videoFrameBuffer, recordingDuration } = params;
+    const { userId, callId, audioBuffer, videoFrameBuffer, recordingDuration } =
+      params;
 
     await connectToDatabase();
 
@@ -491,7 +903,9 @@ export async function processCallRecording(params: {
       throw new Error("Call not found");
     }
 
-    console.log(`🎬 Processing call recording for user ${userId}, call ${callId}`);
+    console.log(
+      `🎬 Processing call recording for user ${userId}, call ${callId}`
+    );
 
     // ⭐ STEP 1: Upload to Cloudinary
     let audioUrl: string | undefined;
@@ -499,7 +913,7 @@ export async function processCallRecording(params: {
 
     if (audioBuffer) {
       console.log(`📤 Uploading audio to Cloudinary...`);
-      
+
       // Convert Buffer to File
       const audioFile = new File(
         [audioBuffer],
@@ -524,7 +938,7 @@ export async function processCallRecording(params: {
 
     if (videoFrameBuffer) {
       console.log(`📤 Uploading video frame to Cloudinary...`);
-      
+
       const videoFile = new File(
         [videoFrameBuffer],
         `call_frame_${callId}_${userId}_${Date.now()}.jpg`,
@@ -541,7 +955,10 @@ export async function processCallRecording(params: {
         videoUrl = videoUploadResult.file.url;
         console.log(`✅ Video frame uploaded to Cloudinary: ${videoUrl}`);
       } else {
-        console.warn(`⚠️ Video upload failed (optional):`, videoUploadResult.error);
+        console.warn(
+          `⚠️ Video upload failed (optional):`,
+          videoUploadResult.error
+        );
         // Video is optional, don't throw
       }
     }
@@ -572,30 +989,53 @@ export async function processCallRecording(params: {
     if (audioBuffer && videoFrameBuffer) {
       // Both audio and video available - combine analysis
       console.log(`🎭 Analyzing both audio and video emotion...`);
-      
-      const audioResult = await HuggingFaceService.analyzeAudioEmotion(audioBuffer);
-      const videoResult = await HuggingFaceService.analyzeVideoEmotion(videoFrameBuffer);
-      
-      emotionResult = HuggingFaceService.combineEmotionAnalysis(audioResult, videoResult);
+
+      const audioResult = await HuggingFaceService.analyzeAudioEmotion(
+        audioBuffer
+      );
+      const videoResult = await HuggingFaceService.analyzeVideoEmotion(
+        videoFrameBuffer
+      );
+
+      emotionResult = HuggingFaceService.combineEmotionAnalysis(
+        audioResult,
+        videoResult
+      );
       audioFeatures = audioResult.audioFeatures;
-      
-      console.log(`✅ Combined emotion: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
+
+      console.log(
+        `✅ Combined emotion: ${emotionResult.emotion} (${(
+          emotionResult.score * 100
+        ).toFixed(0)}%)`
+      );
     } else if (audioBuffer) {
       // Audio only
       console.log(`🎤 Analyzing audio emotion only...`);
-      
-      const audioResult = await HuggingFaceService.analyzeAudioEmotion(audioBuffer);
+
+      const audioResult = await HuggingFaceService.analyzeAudioEmotion(
+        audioBuffer
+      );
       emotionResult = audioResult;
       audioFeatures = audioResult.audioFeatures;
-      
-      console.log(`✅ Audio emotion: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
+
+      console.log(
+        `✅ Audio emotion: ${emotionResult.emotion} (${(
+          emotionResult.score * 100
+        ).toFixed(0)}%)`
+      );
     } else if (videoFrameBuffer) {
       // Video only
       console.log(`📹 Analyzing video emotion only...`);
-      
-      emotionResult = await HuggingFaceService.analyzeVideoEmotion(videoFrameBuffer);
-      
-      console.log(`✅ Video emotion: ${emotionResult.emotion} (${(emotionResult.score * 100).toFixed(0)}%)`);
+
+      emotionResult = await HuggingFaceService.analyzeVideoEmotion(
+        videoFrameBuffer
+      );
+
+      console.log(
+        `✅ Video emotion: ${emotionResult.emotion} (${(
+          emotionResult.score * 100
+        ).toFixed(0)}%)`
+      );
     } else {
       throw new Error("No audio or video data provided for analysis");
     }
@@ -612,7 +1052,9 @@ export async function processCallRecording(params: {
       analyzed_at: new Date(),
     });
 
-    console.log(`💾 EmotionAnalysis created: ${emotionAnalysis._id} for call ${callId}`);
+    console.log(
+      `💾 EmotionAnalysis created: ${emotionAnalysis._id} for call ${callId}`
+    );
 
     // ⭐ STEP 5: Update Call with emotion analysis
     await Call.findByIdAndUpdate(callId, {

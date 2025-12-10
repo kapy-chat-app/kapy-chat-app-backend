@@ -1,5 +1,5 @@
 // pages/api/files/upload-encrypted.ts - NEW FILE
-import { uploadEncryptedFileToCloudinary } from '@/lib/actions/file.action';
+import { uploadEncryptedFile } from '@/lib/actions/file.action';
 import { auth } from '@clerk/nextjs/server';
 import { NextApiRequest, NextApiResponse } from 'next';
 
@@ -28,7 +28,7 @@ export default async function handler(
 
     console.log('📤 API: Uploading encrypted file:', originalFileName);
 
-    const result = await uploadEncryptedFileToCloudinary(
+    const result = await uploadEncryptedFile(
       encryptedBase64,
       originalFileName,
       originalFileType,
