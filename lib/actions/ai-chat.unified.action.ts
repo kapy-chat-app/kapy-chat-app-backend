@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/actions/ai-chat.actions.ts
+// src/actions/ai-chat.unified.action.ts - UNIFIED VERSION
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
@@ -8,12 +8,111 @@ import User from "@/database/user.model";
 import AIChatHistory from "@/database/ai-chat-history.model";
 import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitToUserRoom } from "../socket.helper";
-import { GeminiService, geminiService } from "../services/germini.service";
+import { geminiService } from "../services/germini.service";
 
-/**
- * ⭐ Gửi tin nhắn đến AI Chatbot
- */
-export async function sendAIChatMessage(data: {
+// ============================================
+// INTERFACES
+// ============================================
+interface EmotionContext {
+  recentEmotions: Array<{
+    emotion: string;
+    confidence: number;
+    timestamp: Date;
+  }>;
+  dominantEmotion: string;
+  emotionIntensity: number;
+  emotionTrends: string[];
+  avgConfidence: number;
+}
+
+// ============================================
+// HELPER: Get User Emotion Context
+// ============================================
+async function getUserEmotionContext(userId: any): Promise<EmotionContext | undefined> {
+  try {
+    const recentEmotions = await EmotionAnalysis.find({ user: userId })
+      .sort({ analyzed_at: -1 })
+      .limit(20)
+      .lean();
+
+    if (recentEmotions.length === 0) return undefined;
+
+    const totalIntensity = recentEmotions.reduce(
+      (sum, e) => sum + e.confidence_score,
+      0
+    );
+
+    return {
+      recentEmotions: recentEmotions.map((e) => ({
+        emotion: e.dominant_emotion,
+        confidence: e.confidence_score,
+        timestamp: e.analyzed_at,
+      })),
+      dominantEmotion: recentEmotions[0].dominant_emotion,
+      emotionIntensity: totalIntensity / recentEmotions.length,
+      emotionTrends: recentEmotions.slice(0, 10).map((e) => e.dominant_emotion),
+      avgConfidence: totalIntensity / recentEmotions.length,
+    };
+  } catch (error) {
+    console.error("Error getting emotion context:", error);
+    return undefined;
+  }
+}
+
+// ============================================
+// HELPER: Check and Send Emotion Alert
+// ============================================
+async function checkEmotionAlert(
+  userClerkId: string,
+  dominantEmotion: string,
+  confidenceScore: number,
+  language: "vi" | "en" | "zh"
+) {
+  const negativeEmotions = ["sadness", "anger", "fear"];
+  const isNegative = negativeEmotions.includes(dominantEmotion);
+  const isIntense = confidenceScore > 0.75;
+
+  if (!isNegative || !isIntense) return;
+
+  console.log(
+    `🚨 Strong negative emotion: ${dominantEmotion} (${(
+      confidenceScore * 100
+    ).toFixed(0)}%)`
+  );
+
+  try {
+    const user = await User.findOne({ clerkId: userClerkId });
+    if (!user) return;
+
+    const emotionContext = await getUserEmotionContext(user._id);
+    if (!emotionContext) return;
+
+    const recommendation = await geminiService.analyzeAndRecommend(
+      emotionContext,
+      language
+    );
+
+    await emitToUserRoom("emotionAlert", userClerkId, {
+      type: "strong_negative_emotion",
+      emotion: dominantEmotion,
+      intensity: confidenceScore,
+      recommendation: recommendation.recommendation,
+      supportMessage: recommendation.supportMessage,
+      actionSuggestion: recommendation.actionSuggestion,
+      language,
+      timestamp: new Date(),
+    });
+
+    console.log(`✅ Emotion alert sent to user ${userClerkId}`);
+  } catch (error) {
+    console.error("❌ Error sending emotion alert:", error);
+  }
+}
+
+// ============================================
+// 📨 SEND MESSAGE
+// ============================================
+export async function sendAIMessage(data: {
   message: string;
   conversationId?: string;
   includeEmotionContext?: boolean;
@@ -62,37 +161,32 @@ export async function sendAIChatMessage(data: {
       });
     }
 
-    // Get emotion context
+    // Get emotion context with full details
     let emotionContext;
+    let currentEmotionData;
     if (includeEmotionContext) {
-      const recentEmotions = await EmotionAnalysis.find({ user: user._id })
-        .sort({ analyzed_at: -1 })
-        .limit(10)
-        .lean();
-
-      if (recentEmotions.length > 0) {
-        const totalIntensity = recentEmotions.reduce(
-          (sum, e) => sum + e.confidence_score,
-          0
-        );
-
-        emotionContext = {
-          recentEmotions: recentEmotions.map((e) => ({
-            emotion: e.dominant_emotion,
-            confidence: e.confidence_score,
-            timestamp: e.analyzed_at,
-          })),
-          dominantEmotion: recentEmotions[0].dominant_emotion,
-          emotionIntensity: totalIntensity / recentEmotions.length,
+      emotionContext = await getUserEmotionContext(user._id);
+      if (emotionContext) {
+        currentEmotionData = {
+          emotion: emotionContext.dominantEmotion,
+          confidence: emotionContext.avgConfidence,
+          trends: emotionContext.emotionTrends,
+          intensity: emotionContext.emotionIntensity,
         };
 
         chatHistory.emotion_context = {
-          dominant_emotion: recentEmotions[0].dominant_emotion,
-          recent_emotions: recentEmotions
-            .slice(0, 5)
-            .map((e) => e.dominant_emotion),
-          avg_confidence: totalIntensity / recentEmotions.length,
+          dominant_emotion: emotionContext.dominantEmotion,
+          recent_emotions: emotionContext.emotionTrends,
+          avg_confidence: emotionContext.avgConfidence,
         };
+
+        // Check for emotion alert
+        await checkEmotionAlert(
+          user.clerkId,
+          emotionContext.dominantEmotion,
+          emotionContext.avgConfidence,
+          language || "vi"
+        );
       }
     }
 
@@ -104,18 +198,21 @@ export async function sendAIChatMessage(data: {
       timestamp: new Date(),
     });
 
-    // Get AI response
-    const conversationHistory = chatHistory.messages.slice(-10).map((m:any) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
+    // Get AI response with emotion-aware context
+    const conversationHistory = chatHistory.messages
+      .slice(-10)
+      .map((m: any) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
 
-    const { response: aiResponse, detectedLanguage } = await geminiService.chat(
-      message,
-      conversationHistory,
-      emotionContext,
-      language || chatHistory.metadata?.language_preference
-    );
+    const { response: aiResponse, detectedLanguage } =
+      await geminiService.chat(
+        message,
+        conversationHistory,
+        emotionContext,
+        language || chatHistory.metadata?.language_preference
+      );
 
     // Update language preference
     if (!chatHistory.metadata) chatHistory.metadata = {};
@@ -149,16 +246,16 @@ export async function sendAIChatMessage(data: {
       is_typing: false,
     });
 
-    // 🔔 Send AI response
+    // 🔔 Send AI response with emotion context
     await emitToUserRoom("aiChatResponse", user.clerkId, {
       conversation_id: chatConvId,
       message: aiResponse,
       language: detectedLanguage,
-      emotion_context: emotionContext?.dominantEmotion,
+      emotion_context: currentEmotionData,
       timestamp: new Date(),
     });
 
-    console.log(`✅ AI chat response sent (${detectedLanguage})`);
+    console.log(`✅ AI response sent (${detectedLanguage})`);
 
     return {
       success: true,
@@ -167,14 +264,13 @@ export async function sendAIChatMessage(data: {
         conversation_id: chatConvId,
         language: detectedLanguage,
         title: chatHistory.title,
-        emotion_detected: emotionContext?.dominantEmotion,
+        emotion_context: currentEmotionData,
         timestamp: new Date(),
       },
     };
   } catch (error) {
     console.error("❌ Error in AI chat:", error);
 
-    // 🔔 Emit error
     try {
       const { userId } = await auth();
       if (userId) {
@@ -182,7 +278,9 @@ export async function sendAIChatMessage(data: {
         if (user) {
           await emitToUserRoom("aiChatError", user.clerkId, {
             error:
-              error instanceof Error ? error.message : "Failed to send message",
+              error instanceof Error
+                ? error.message
+                : "Failed to send message",
           });
 
           await emitToUserRoom("aiTyping", user.clerkId, {
@@ -199,10 +297,10 @@ export async function sendAIChatMessage(data: {
   }
 }
 
-/**
- * ⭐ Lấy lịch sử chat
- */
-export async function getAIChatHistory(data: {
+// ============================================
+// 📜 GET CHAT HISTORY
+// ============================================
+export async function getChatHistory(data: {
   conversationId: string;
   page?: number;
   limit?: number;
@@ -268,10 +366,13 @@ export async function getAIChatHistory(data: {
   }
 }
 
-/**
- * ⭐ Lấy tất cả cuộc trò chuyện
- */
-export async function getAllAIChatConversations() {
+// ============================================
+// 📋 GET ALL CONVERSATIONS (for sidebar)
+// ============================================
+export async function getAllConversations(data?: {
+  limit?: number;
+  offset?: number;
+}) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
@@ -280,8 +381,14 @@ export async function getAllAIChatConversations() {
     const user = await User.findOne({ clerkId: userId });
     if (!user) throw new Error("User not found");
 
+    const { limit = 50, offset = 0 } = data || {};
+
+    const total = await AIChatHistory.countDocuments({ user: user._id });
+
     const conversations = await AIChatHistory.find({ user: user._id })
       .sort({ updated_at: -1 })
+      .skip(offset)
+      .limit(limit)
       .select(
         "conversation_id title messages updated_at emotion_context metadata"
       )
@@ -289,15 +396,25 @@ export async function getAllAIChatConversations() {
 
     return {
       success: true,
-      data: conversations.map((conv: any) => ({
-        conversation_id: conv.conversation_id,
-        title: conv.title,
-        last_message: conv.messages[conv.messages.length - 1]?.content || "",
-        last_updated: conv.updated_at,
-        message_count: conv.messages.length,
-        emotion_context: conv.emotion_context,
-        language: conv.metadata?.language_preference || "vi",
-      })),
+      data: {
+        conversations: conversations.map((conv: any) => ({
+          conversation_id: conv.conversation_id,
+          title: conv.title || "Untitled Chat",
+          preview:
+            conv.messages[conv.messages.length - 1]?.content?.slice(0, 50) ||
+            "",
+          last_updated: conv.updated_at,
+          message_count: conv.messages.length,
+          emotion_context: conv.emotion_context,
+          language: conv.metadata?.language_preference || "vi",
+        })),
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore: offset + limit < total,
+        },
+      },
     };
   } catch (error) {
     console.error("❌ Error getting conversations:", error);
@@ -309,10 +426,10 @@ export async function getAllAIChatConversations() {
   }
 }
 
-/**
- * ⭐ Xóa cuộc trò chuyện
- */
-export async function deleteAIChatConversation(conversationId: string) {
+// ============================================
+// 🗑️ DELETE CONVERSATION
+// ============================================
+export async function deleteConversation(conversationId: string) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
@@ -339,9 +456,9 @@ export async function deleteAIChatConversation(conversationId: string) {
   }
 }
 
-/**
- * ⭐ Lấy gợi ý cảm xúc từ AI
- */
+// ============================================
+// 💡 GET EMOTION RECOMMENDATION
+// ============================================
 export async function getEmotionRecommendation(
   language: "vi" | "en" | "zh" = "vi"
 ) {
@@ -353,36 +470,15 @@ export async function getEmotionRecommendation(
     const user = await User.findOne({ clerkId: userId });
     if (!user) throw new Error("User not found");
 
-    // Lấy 10 cảm xúc gần nhất
-    const recentEmotions = await EmotionAnalysis.find({ user: user._id })
-      .sort({ analyzed_at: -1 })
-      .limit(10)
-      .lean();
+    const emotionContext = await getUserEmotionContext(user._id);
 
-    if (recentEmotions.length === 0) {
+    if (!emotionContext) {
       return {
         success: false,
         error: "No emotion data available",
       };
     }
 
-    const totalIntensity = recentEmotions.reduce(
-      (sum, e) => sum + e.confidence_score,
-      0
-    );
-    const avgIntensity = totalIntensity / recentEmotions.length;
-
-    const emotionContext = {
-      recentEmotions: recentEmotions.map((e) => ({
-        emotion: e.dominant_emotion,
-        confidence: e.confidence_score,
-        timestamp: e.analyzed_at,
-      })),
-      dominantEmotion: recentEmotions[0].dominant_emotion,
-      emotionIntensity: avgIntensity,
-    };
-
-    // Gọi AI
     const recommendation = await geminiService.analyzeAndRecommend(
       emotionContext,
       language
@@ -391,8 +487,9 @@ export async function getEmotionRecommendation(
     return {
       success: true,
       data: {
-        currentEmotion: recentEmotions[0].dominant_emotion,
-        emotionIntensity: avgIntensity,
+        currentEmotion: emotionContext.dominantEmotion,
+        emotionIntensity: emotionContext.emotionIntensity,
+        emotionTrends: emotionContext.emotionTrends,
         recommendation: recommendation.recommendation,
         supportMessage: recommendation.supportMessage,
         actionSuggestion: recommendation.actionSuggestion,
@@ -407,93 +504,5 @@ export async function getEmotionRecommendation(
       error:
         error instanceof Error ? error.message : "Failed to get recommendation",
     };
-  }
-}
-
-/**
- * ⭐ REALTIME: Kiểm tra và gửi alert khi cảm xúc mạnh
- */
-export async function checkAndSendEmotionAlert(emotionData: {
-  userId: string;
-  dominantEmotion: string;
-  confidenceScore: number;
-  language?: "vi" | "en" | "zh";
-}) {
-  try {
-    const {
-      userId,
-      dominantEmotion,
-      confidenceScore,
-      language = "vi",
-    } = emotionData;
-
-    // Chỉ alert khi cảm xúc tiêu cực và rất mạnh
-    const negativeEmotions = ["sadness", "anger", "fear"];
-    const isNegative = negativeEmotions.includes(dominantEmotion);
-    const isIntense = confidenceScore > 0.75;
-
-    if (!isNegative || !isIntense) {
-      return { success: true, alerted: false };
-    }
-
-    console.log(
-      `🚨 Strong negative emotion: ${dominantEmotion} (${(
-        confidenceScore * 100
-      ).toFixed(0)}%)`
-    );
-
-    await connectToDatabase();
-    const user = await User.findOne({ clerkId: userId });
-    if (!user) return { success: false };
-
-    // Get emotion context
-    const recentEmotions = await EmotionAnalysis.find({ user: user._id })
-      .sort({ analyzed_at: -1 })
-      .limit(10)
-      .lean();
-
-    const totalIntensity = recentEmotions.reduce(
-      (sum, e) => sum + e.confidence_score,
-      0
-    );
-
-    const emotionContext = {
-      recentEmotions: recentEmotions.map((e) => ({
-        emotion: e.dominant_emotion,
-        confidence: e.confidence_score,
-        timestamp: e.analyzed_at,
-      })),
-      dominantEmotion,
-      emotionIntensity: totalIntensity / recentEmotions.length,
-    };
-
-    // Gọi AI
-    const recommendation = await geminiService.analyzeAndRecommend(
-      emotionContext,
-      language
-    );
-
-    // 🔔 Gửi qua socket
-    await emitToUserRoom("emotionAlert", userId, {
-      type: "strong_negative_emotion",
-      emotion: dominantEmotion,
-      intensity: confidenceScore,
-      recommendation: recommendation.recommendation,
-      supportMessage: recommendation.supportMessage,
-      actionSuggestion: recommendation.actionSuggestion,
-      language,
-      timestamp: new Date(),
-    });
-
-    console.log(`✅ Emotion alert sent to user ${userId}`);
-
-    return {
-      success: true,
-      alerted: true,
-      recommendation,
-    };
-  } catch (error) {
-    console.error("❌ Error sending alert:", error);
-    return { success: false, error };
   }
 }

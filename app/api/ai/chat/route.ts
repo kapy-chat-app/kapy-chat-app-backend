@@ -1,28 +1,32 @@
 // src/app/api/ai/chat/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { sendAIChatMessage } from "@/lib/actions/ai-chat.action";
+import { sendAIMessage } from "@/lib/actions/ai-chat.unified.action";
 
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const { message, conversationId, includeEmotionContext, language } = body;
+  try {
+    const body = await req.json();
+    const { message, conversationId, includeEmotionContext, language } = body;
 
-  if (!message) {
+    if (!message?.trim()) {
+      return NextResponse.json(
+        { success: false, error: "Message is required" },
+        { status: 400 }
+      );
+    }
+
+    const result = await sendAIMessage({
+      message,
+      conversationId,
+      includeEmotionContext,
+      language,
+    });
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("API Error:", error);
     return NextResponse.json(
-      { success: false, error: "Message is required" },
-      { status: 400 }
+      { success: false, error: "Internal server error" },
+      { status: 500 }
     );
   }
-
-  const result = await sendAIChatMessage({
-    message,
-    conversationId,
-    includeEmotionContext,
-    language
-  });
-
-  if (!result.success) {
-    return NextResponse.json(result, { status: 400 });
-  }
-
-  return NextResponse.json(result);
 }
