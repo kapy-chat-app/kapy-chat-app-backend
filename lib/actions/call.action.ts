@@ -877,7 +877,6 @@ export async function endCall(params: {
   }
 }
 
-
 export async function processCallRecording(params: {
   userId: string;
   callId: string;
@@ -913,7 +912,6 @@ export async function processCallRecording(params: {
 
     if (audioBuffer) {
       console.log(`📤 Uploading audio to Cloudinary...`);
-
       // Convert Buffer to File
       const audioFile = new File(
         [audioBuffer],
@@ -938,7 +936,6 @@ export async function processCallRecording(params: {
 
     if (videoFrameBuffer) {
       console.log(`📤 Uploading video frame to Cloudinary...`);
-
       const videoFile = new File(
         [videoFrameBuffer],
         `call_frame_${callId}_${userId}_${Date.now()}.jpg`,

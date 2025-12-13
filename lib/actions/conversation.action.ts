@@ -960,9 +960,6 @@ async function populateConversation(conversation: any) {
           select: 'url name type size',
           model: 'File'
         }
-      ]
-    },
-    {
       path: 'avatar',
       select: 'url name type',
       model: 'File'

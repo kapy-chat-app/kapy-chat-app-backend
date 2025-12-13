@@ -129,6 +129,15 @@ const UserSchema = new Schema<IUser>({
     type: Date,
     default: null,
   },
+   encryption_public_key: { 
+      type: String, 
+      default: null,
+      index: true, // ✅ Index for faster queries
+    },
+    encryption_key_uploaded_at: {
+      type: Date,
+      default: null,
+    },
   status: { type: String, maxlength: 100 },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },

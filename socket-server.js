@@ -200,14 +200,98 @@ app.prepare().then(() => {
             timestamp: new Date(),
           });
         } catch (error) {
-          console.error(`❌ Error handling ${eventName}:`, error);
-          socket.emit(`${eventName}Error`, {
+          console.error(`❌ Error handling userTyping:`, error);
+        }
+      });
+      handleSocketEvent("stopTyping");
+
+      // Call, Friend, Conversation, Group, Reaction, Read Events
+      handleSocketEvent("startCall");
+      handleSocketEvent("startGroupCall");
+      handleSocketEvent("answerCall");
+      handleSocketEvent("declineCall");
+      handleSocketEvent("endCall");
+      handleSocketEvent("joinCall");
+      handleSocketEvent("leaveCall");
+      handleSocketEvent("getCallHistory");
+      handleSocketEvent("sendFriendRequest");
+      handleSocketEvent("acceptFriendRequest");
+      handleSocketEvent("declineFriendRequest");
+      handleSocketEvent("cancelFriendRequest");
+      handleSocketEvent("removeFriend");
+      handleSocketEvent("blockFriend");
+      handleSocketEvent("unblockFriend");
+      handleSocketEvent("getFriends");
+      handleSocketEvent("getFriendRequests");
+      handleSocketEvent("newConversation");
+      handleSocketEvent("updateConversation");
+      handleSocketEvent("deleteConversation");
+      handleSocketEvent("getConversations");
+      handleSocketEvent("getConversation");
+      handleSocketEvent("getConversationParticipants");
+      handleSocketEvent("createGroup");
+      handleSocketEvent("updateGroupInfo");
+      handleSocketEvent("addGroupMember");
+      handleSocketEvent("removeGroupMember");
+      handleSocketEvent("leaveGroup");
+      handleSocketEvent("deleteGroup");
+      handleSocketEvent("newReaction");
+      handleSocketEvent("deleteReaction");
+      handleSocketEvent("getReactions");
+      handleSocketEvent("getMessageReactions");
+      handleSocketEvent("markAsRead");
+      handleSocketEvent("deleteRead");
+      handleSocketEvent("getReads");
+      handleSocketEvent("getMessageReads");
+      handleSocketEvent("markConversationAsRead");
+      handleSocketEvent("getUnreadCount");
+
+      // Join/Leave Conversation
+      socket.on("joinConversation", (conversationId) => {
+        const roomName = `conversation:${conversationId}`;
+        socket.join(roomName);
+        console.log(
+          `📥 Socket ${socket.id} joined conversation room: ${roomName}`
+        );
+      });
+
+      socket.on("leaveConversation", (conversationId) => {
+        const roomName = `conversation:${conversationId}`;
+        socket.leave(roomName);
+        console.log(
+          `📤 Socket ${socket.id} left conversation room: ${roomName}`
+        );
+      });
+
+      // ==========================================
+      // 🆕 AI CHATBOT EVENTS
+      // ==========================================
+      socket.on("aiChatMessage", async (data) => {
+        try {
+          const { user_id, message, conversation_id, include_emotion } = data;
+          console.log(`🤖 AI Chat message from user ${user_id}:`, message);
+
+          socket.emit("aiTyping", {
+            conversation_id,
+            is_typing: true,
+          });
+
+          io.to(`user:${user_id}`).emit("aiChatMessageReceived", {
+            conversation_id,
+            user_message: message,
+            timestamp: new Date(),
+            status: "processing",
+          });
+
+          console.log(`✅ AI chat message acknowledged for user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling aiChatMessage:`, error);
+          socket.emit("aiChatError", {
             error: error.message,
             timestamp: new Date(),
           });
         }
       });
-    }
 
     // ==========================================
     // TYPING INDICATOR
@@ -455,14 +539,161 @@ app.prepare().then(() => {
         timestamp: new Date(),
         receivedData: data,
       });
-    });
 
-    socket.on("echo", (data) => {
-      console.log("🔄 Echo request:", data);
-      socket.emit("echoResponse", {
-        echo: data,
-        timestamp: new Date(),
+      // ==========================================
+      // EMOTION ANALYSIS & RECOMMENDATIONS
+      // ==========================================
+      socket.on("emotionAnalysisComplete", async (data) => {
+        try {
+          const { user_id, message_id, emotion_data, is_sender, context } = data;
+          console.log(`😊 Emotion analysis complete for message ${message_id}`);
+
+          io.to(`user:${user_id}`).emit("emotionAnalyzed", {
+            message_id,
+            is_sender,
+            context,
+            emotion: emotion_data.dominant_emotion,
+            confidence: emotion_data.confidence_score,
+            all_scores: emotion_data.emotion_scores,
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ Emotion analysis delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling emotionAnalysisComplete:`, error);
+        }
       });
+
+      socket.on("requestEmotionRecommendations", async (data) => {
+        try {
+          const { user_id, emotion, confidence } = data;
+          console.log(`💡 Recommendations requested by user ${user_id}`);
+
+          socket.emit("recommendationsProcessing", {
+            user_id,
+            emotion,
+            status: "generating_ai_recommendations",
+            timestamp: new Date(),
+          });
+        } catch (error) {
+          console.error(`❌ Error handling requestEmotionRecommendations:`, error);
+        }
+      });
+
+      socket.on("sendRecommendations", async (data) => {
+        try {
+          const { user_id, emotion, recommendations, based_on } = data;
+          console.log(`💡 Sending AI recommendations to user ${user_id}`);
+
+          io.to(`user:${user_id}`).emit("emotionRecommendations", {
+            emotion,
+            recommendations,
+            based_on: {
+              ...based_on,
+              source: 'huggingface-ai',
+              generated_at: new Date(),
+            },
+            timestamp: new Date(),
+          });
+
+          console.log(`✅ AI recommendations delivered to user ${user_id}`);
+        } catch (error) {
+          console.error(`❌ Error handling sendRecommendations:`, error);
+        }
+      });
+
+      socket.on("emotionTrendsUpdate", async (data) => {
+        try {
+          const { user_id, trends, summary } = data;
+          console.log(`📊 Emotion trends update for user ${user_id}`);
+
+          io.to(`user:${user_id}`).emit("emotionTrendsUpdated", {
+            trends,
+            summary,
+            timestamp: new Date(),
+          });
+        } catch (error) {
+          console.error(`❌ Error handling emotionTrendsUpdate:`, error);
+        }
+      });
+
+      socket.on("bulkEmotionAnalysis", async (data) => {
+        try {
+          const { message_id, conversation_id, participants_data } = data;
+          console.log(`📊 Bulk emotion analysis for message ${message_id}`);
+
+          participants_data.forEach((participantData) => {
+            const { user_id, emotion, confidence, recommendations, is_sender } = participantData;
+            
+            io.to(`user:${user_id}`).emit("emotionAnalyzedWithRecommendations", {
+              message_id,
+              conversation_id,
+              is_sender,
+              emotion_data: { emotion, confidence },
+              recommendations: recommendations || [],
+              timestamp: new Date(),
+            });
+          });
+
+          console.log(`✅ Bulk emotion analysis completed`);
+        } catch (error) {
+          console.error(`❌ Error handling bulkEmotionAnalysis:`, error);
+        }
+      });
+
+      // Test Events
+      socket.on("test", (data) => {
+        console.log("📨 Test event received:", data);
+        socket.emit("testResponse", {
+          message: "Test successful!",
+          timestamp: new Date(),
+          receivedData: data,
+        });
+      });
+
+      socket.on("echo", (data) => {
+        console.log("🔄 Echo request:", data);
+        socket.emit("echoResponse", {
+          echo: data,
+          timestamp: new Date(),
+        });
+      });
+
+      // ==========================================
+      // DISCONNECT - IMPROVED WITH GRACE PERIOD
+      // ==========================================
+      socket.on("disconnect", () => {
+        console.log(`🔌 Socket disconnected: ${socket.id}`);
+
+        const disconnectedUser = onlineUsers.find(
+          (user) => user.socketId === socket.id
+        );
+        
+        if (disconnectedUser) {
+          const user_id = disconnectedUser.userId;
+          
+          // ✨ IMPROVED: Grace period before removing (for screen transitions)
+          setTimeout(() => {
+            // Check if user reconnected with a different socket
+            const currentUser = onlineUsers.find(u => u.userId === user_id);
+            
+            if (currentUser && currentUser.socketId === socket.id) {
+              // User didn't reconnect, remove them
+              onlineUsers = onlineUsers.filter(
+                (user) => user.socketId !== socket.id
+              );
+              console.log(`👋 User ${user_id} removed from online users`);
+              
+              global.onlineUsers = onlineUsers;
+              emitOnlineUsersDebounced();
+            } else {
+              console.log(`✅ User ${user_id} reconnected, keeping online status`);
+            }
+          }, DEBOUNCE_DELAY); // 2 second grace period
+        }
+      });
+
+      console.log("🤖 AI Emotion & Recommendation events registered");
     });
 
     // ==========================================
@@ -487,9 +718,9 @@ app.prepare().then(() => {
         }
       }, DEBOUNCE_DELAY);
     });
-
+  
     console.log("🤖 AI Emotion & Recommendation events registered");
-  });
+  }});
 
   // Cleanup debounce timeouts
   process.on("SIGTERM", () => {

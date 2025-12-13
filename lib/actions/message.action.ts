@@ -549,12 +549,10 @@ export async function getMessages(
           ],
         },
       },
-
       // Stage 2: Sort and paginate
       { $sort: { created_at: -1 } },
       { $skip: skip },
       { $limit: limit },
-
       // Stage 3: Lookup sender with avatar in one go
       {
         $lookup: {
@@ -587,7 +585,6 @@ export async function getMessages(
           sender: { $arrayElemAt: ["$senderData", 0] },
         },
       },
-
       // Stage 4: Lookup attachments (metadata only)
       {
         $lookup: {
@@ -612,7 +609,6 @@ export async function getMessages(
           ],
         },
       },
-
       // Stage 5: Lookup reply_to message
       {
         $lookup: {
@@ -690,7 +686,6 @@ export async function getMessages(
           reply_to: { $arrayElemAt: ["$replyToData", 0] },
         },
       },
-
       // Stage 6: Lookup read_by users and avatars together
       {
         $lookup: {
@@ -719,7 +714,6 @@ export async function getMessages(
           as: "readByUsersData",
         },
       },
-
       // Stage 7: Process read_by in single $addFields
       {
         $addFields: {
@@ -759,7 +753,6 @@ export async function getMessages(
           },
         },
       },
-
       // Stage 8: ✨ CRITICAL FIX - Keep all fields including metadata
       {
         $project: {
