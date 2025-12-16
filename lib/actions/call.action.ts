@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// lib/actions/call.actions.ts (ENHANCED VERSION)
+// lib/actions/call.actions.ts - UPDATED FOR REAL-TIME EMOTION
 "use server";
 
 import { connectToDatabase } from "@/lib/mongoose";
@@ -9,12 +9,9 @@ import User from "@/database/user.model";
 import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitSocketEvent, emitToUserRoom } from "@/lib/socket.helper";
 import { clerkClient } from "@clerk/nextjs/server";
-import HuggingFaceService from "@/lib/services/huggingface.service";
-import { uploadFileToCloudinary } from "./file.action";
 import PushToken from "@/database/push-token.model";
 import { sendCallNotification as sendFCMCallNotification, isValidFCMToken } from '../services/fcm.service';
 import { sendCallNotification as sendExpoCallNotification } from '../pushNotification';
-
 import Message from "@/database/message.model";
 
 /**
@@ -721,7 +718,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
 }
 
 /**
- * ⭐ FINAL FIX: End a call - Caller creates message even if already ended/rejected/missed
+ * ⭐ UPDATED: End a call - NO MORE requestCallRecording
  */
 export async function endCall(params: {
   userId: string;
@@ -853,16 +850,8 @@ export async function endCall(params: {
       }
     }
 
-    if (conversation && conversation.participants) {
-      for (const participant of conversation.participants) {
-        await emitToUserRoom("requestCallRecording", participant.clerkId, {
-          call_id: call._id.toString(),
-          conversation_id: conversation._id.toString(),
-          call_type: call.type,
-          duration: callDuration || 0,
-        });
-      }
-    }
+    // ❌ REMOVED: requestCallRecording emission
+    // Real-time emotion analysis handles this during the call
 
     console.log("🔔 ========== END CALL COMPLETED ==========");
     return {
@@ -877,222 +866,8 @@ export async function endCall(params: {
   }
 }
 
-export async function processCallRecording(params: {
-  userId: string;
-  callId: string;
-  audioBuffer?: Buffer;
-  videoFrameBuffer?: Buffer;
-  recordingDuration?: number;
-}) {
-  try {
-    const { userId, callId, audioBuffer, videoFrameBuffer, recordingDuration } =
-      params;
-
-    await connectToDatabase();
-
-    // Find MongoDB User from clerkId
-    const mongoUser = await User.findOne({ clerkId: userId });
-    if (!mongoUser) {
-      throw new Error("User not found in database");
-    }
-
-    // Find call
-    const call = await Call.findById(callId).populate("conversation");
-    if (!call) {
-      throw new Error("Call not found");
-    }
-
-    console.log(
-      `🎬 Processing call recording for user ${userId}, call ${callId}`
-    );
-
-    // ⭐ STEP 1: Upload to Cloudinary
-    let audioUrl: string | undefined;
-    let videoUrl: string | undefined;
-
-    if (audioBuffer) {
-      console.log(`📤 Uploading audio to Cloudinary...`);
-      // Convert Buffer to File
-      const audioFile = new File(
-        [audioBuffer],
-        `call_audio_${callId}_${userId}_${Date.now()}.wav`,
-        { type: "audio/wav" }
-      );
-
-      const audioUploadResult = await uploadFileToCloudinary(
-        audioFile,
-        "call_recordings/audio",
-        userId
-      );
-
-      if (audioUploadResult.success && audioUploadResult.file) {
-        audioUrl = audioUploadResult.file.url;
-        console.log(`✅ Audio uploaded to Cloudinary: ${audioUrl}`);
-      } else {
-        console.error(`❌ Audio upload failed:`, audioUploadResult.error);
-        throw new Error(audioUploadResult.error || "Audio upload failed");
-      }
-    }
-
-    if (videoFrameBuffer) {
-      console.log(`📤 Uploading video frame to Cloudinary...`);
-      const videoFile = new File(
-        [videoFrameBuffer],
-        `call_frame_${callId}_${userId}_${Date.now()}.jpg`,
-        { type: "image/jpeg" }
-      );
-
-      const videoUploadResult = await uploadFileToCloudinary(
-        videoFile,
-        "call_recordings/frames",
-        userId
-      );
-
-      if (videoUploadResult.success && videoUploadResult.file) {
-        videoUrl = videoUploadResult.file.url;
-        console.log(`✅ Video frame uploaded to Cloudinary: ${videoUrl}`);
-      } else {
-        console.warn(
-          `⚠️ Video upload failed (optional):`,
-          videoUploadResult.error
-        );
-        // Video is optional, don't throw
-      }
-    }
-
-    // ⭐ STEP 2: Update Call model with Cloudinary URLs
-    const callUpdateData: any = {
-      recording_uploaded_at: new Date(),
-    };
-
-    if (audioUrl) {
-      callUpdateData.recording_audio_url = audioUrl;
-    }
-    if (videoUrl) {
-      callUpdateData.recording_video_url = videoUrl;
-    }
-    if (recordingDuration) {
-      callUpdateData.recording_duration = recordingDuration;
-    }
-
-    await Call.findByIdAndUpdate(callId, { $set: callUpdateData });
-    console.log(`💾 Call updated with Cloudinary URLs`);
-
-    // ⭐ STEP 3: Analyze emotion using HuggingFace
-    let emotionResult: any = null;
-    let audioFeatures: any = undefined;
-
-    // Analyze based on available data
-    if (audioBuffer && videoFrameBuffer) {
-      // Both audio and video available - combine analysis
-      console.log(`🎭 Analyzing both audio and video emotion...`);
-
-      const audioResult = await HuggingFaceService.analyzeAudioEmotion(
-        audioBuffer
-      );
-      const videoResult = await HuggingFaceService.analyzeVideoEmotion(
-        videoFrameBuffer
-      );
-
-      emotionResult = HuggingFaceService.combineEmotionAnalysis(
-        audioResult,
-        videoResult
-      );
-      audioFeatures = audioResult.audioFeatures;
-
-      console.log(
-        `✅ Combined emotion: ${emotionResult.emotion} (${(
-          emotionResult.score * 100
-        ).toFixed(0)}%)`
-      );
-    } else if (audioBuffer) {
-      // Audio only
-      console.log(`🎤 Analyzing audio emotion only...`);
-
-      const audioResult = await HuggingFaceService.analyzeAudioEmotion(
-        audioBuffer
-      );
-      emotionResult = audioResult;
-      audioFeatures = audioResult.audioFeatures;
-
-      console.log(
-        `✅ Audio emotion: ${emotionResult.emotion} (${(
-          emotionResult.score * 100
-        ).toFixed(0)}%)`
-      );
-    } else if (videoFrameBuffer) {
-      // Video only
-      console.log(`📹 Analyzing video emotion only...`);
-
-      emotionResult = await HuggingFaceService.analyzeVideoEmotion(
-        videoFrameBuffer
-      );
-
-      console.log(
-        `✅ Video emotion: ${emotionResult.emotion} (${(
-          emotionResult.score * 100
-        ).toFixed(0)}%)`
-      );
-    } else {
-      throw new Error("No audio or video data provided for analysis");
-    }
-
-    // ⭐ STEP 4: Create EmotionAnalysis record
-    const emotionAnalysis = await EmotionAnalysis.create({
-      user: mongoUser._id,
-      conversation: call.conversation,
-      emotion_scores: emotionResult.allScores,
-      dominant_emotion: emotionResult.emotion,
-      confidence_score: emotionResult.score,
-      audio_features: audioFeatures,
-      context: "call",
-      analyzed_at: new Date(),
-    });
-
-    console.log(
-      `💾 EmotionAnalysis created: ${emotionAnalysis._id} for call ${callId}`
-    );
-
-    // ⭐ STEP 5: Update Call with emotion analysis
-    await Call.findByIdAndUpdate(callId, {
-      $set: {
-        emotion_analysis: {
-          emotion: emotionResult.emotion,
-          confidence: emotionResult.score,
-          analyzed_at: new Date(),
-        },
-      },
-    });
-
-    // Emit emotion analysis result to user
-    await emitToUserRoom("callEmotionAnalyzed", userId, {
-      call_id: callId,
-      emotion: emotionResult.emotion,
-      score: emotionResult.score,
-      emotion_scores: emotionResult.allScores,
-      analysis_id: emotionAnalysis._id.toString(),
-      recording_duration: recordingDuration,
-      audio_url: audioUrl, // ⭐ NEW
-      video_url: videoUrl, // ⭐ NEW
-    });
-
-    return {
-      success: true,
-      emotion: emotionResult.emotion,
-      score: emotionResult.score,
-      emotionScores: emotionResult.allScores,
-      analysisId: emotionAnalysis._id.toString(),
-      audioUrl, // ⭐ NEW
-      videoUrl, // ⭐ NEW
-    };
-  } catch (error: any) {
-    console.error("❌ Error processing call recording:", error);
-    throw new Error(error.message || "Failed to process call recording");
-  }
-}
-
 /**
- * ⭐ UPDATED: Get emotion analysis for a call - Now includes Cloudinary URLs
+ * ⭐ UPDATED: Get emotion analysis for a call - Real-time data
  */
 export async function getCallEmotionAnalysis(params: {
   callId: string;
@@ -1103,7 +878,6 @@ export async function getCallEmotionAnalysis(params: {
 
     await connectToDatabase();
 
-    // Find call with recording URLs
     const call = await Call.findById(callId);
     if (!call) {
       throw new Error("Call not found");
@@ -1127,7 +901,7 @@ export async function getCallEmotionAnalysis(params: {
       }
     }
 
-    // Get emotion analyses
+    // Get emotion analyses (real-time captured)
     const analyses = await EmotionAnalysis.find(query)
       .populate("user", "clerkId full_name username avatar")
       .sort({ analyzed_at: -1 });
@@ -1135,11 +909,6 @@ export async function getCallEmotionAnalysis(params: {
     return {
       success: true,
       data: analyses.map((a) => a.toObject()),
-      // ⭐ NEW: Include Cloudinary URLs from Call
-      audioUrl: call.recording_audio_url,
-      videoUrl: call.recording_video_url,
-      recordingDuration: call.recording_duration,
-      emotionSummary: call.emotion_analysis,
     };
   } catch (error: any) {
     console.error("❌ Error getting call emotion analysis:", error);

@@ -10,6 +10,8 @@ import Message from "@/database/message.model";
 import { deleteFileFromCloud, uploadFileToCloud } from "./file.action";
 import File from "@/database/file.model";
 import { emitToUserRoom } from "../socket.helper";
+import { model } from "mongoose";
+import path from "path";
 
 // ============================================
 // HELPER: Emit Socket Events
@@ -960,6 +962,9 @@ async function populateConversation(conversation: any) {
           select: 'url name type size',
           model: 'File'
         }
+      ]
+    },
+    {
       path: 'avatar',
       select: 'url name type',
       model: 'File'
@@ -1044,7 +1049,6 @@ async function populateConversation(conversation: any) {
 
   return transformedConversation;
 }
-
 
 
 export async function getConversationMedia(
