@@ -187,6 +187,45 @@ app.prepare().then(() => {
   });
 });
 
+socket.on("joinCallRoom", ({ callId, conversationId }) => {
+  if (!callId) {
+    console.error("❌ Missing callId in joinCallRoom");
+    socket.emit("error", { message: "callId is required" });
+    return;
+  }
+
+  const callRoom = `call:${callId}`;
+  socket.join(callRoom);
+  
+  console.log(`📞 Socket ${socket.id} joined call room: ${callRoom}`);
+  
+  // ✅ Emit confirmation back to client
+  socket.emit("joinedCallRoom", { 
+    callId,
+    callRoom,
+    conversationId,
+    success: true 
+  });
+});
+
+socket.on("leaveCallRoom", ({ callId }) => {
+  if (!callId) {
+    console.error("❌ Missing callId in leaveCallRoom");
+    return;
+  }
+
+  const callRoom = `call:${callId}`;
+  socket.leave(callRoom);
+  
+  console.log(`📞 Socket ${socket.id} left call room: ${callRoom}`);
+  
+  socket.emit("leftCallRoom", { 
+    callId,
+    callRoom,
+    success: true 
+  });
+});
+
     // ==========================================
     // HELPER FUNCTION
     // ==========================================
