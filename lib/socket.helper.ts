@@ -61,6 +61,34 @@ export async function emitToUserRoom(
   }
 }
 
+// ⭐⭐⭐ NEW: Emit đến call room (CHO CALL-RELATED EVENTS) ⭐⭐⭐
+export async function emitToCallRoom(
+  event: string,
+  callId: string,
+  data: any
+) {
+  try {
+    const socketUrl = process.env.SOCKET_URL || 'http://localhost:3000/api/socket/emit';
+    
+    await fetch(socketUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        roomName: `call:${callId}`, // ⭐ Call room format
+        data: {
+          ...data,
+          timestamp: new Date(),
+        }
+      })
+    });
+    
+    console.log(`✅ Socket event '${event}' emitted to call room: call:${callId}`);
+  } catch (socketError) {
+    console.error(`⚠️ Socket emit failed for '${event}' to call ${callId}:`, socketError);
+  }
+}
+
 
 /**
  * Check if user is currently active in a conversation
