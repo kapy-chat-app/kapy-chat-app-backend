@@ -6,7 +6,7 @@ import { createServer } from "http";
 import next from "next";
 import { Server } from "socket.io";
 
-// ✅ Import activeUsers trực tiếp (ESM) - SẠCH & NHANH
+// ✅ Import activeUsers trực tiếp (ESM)
 import * as activeUsers from "./lib/socket/activeUsers.js";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -16,7 +16,6 @@ const port = 3000;
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
 
-// Setup __dirname (vẫn cần cho Next.js)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -27,7 +26,7 @@ export let onlineUsers = [];
 
 // Debounce online users broadcast
 const userUpdateDebounce = new Map();
-const DEBOUNCE_DELAY = 2000; // 2s grace period khi disconnect
+const DEBOUNCE_DELAY = 2000;
 
 function emitOnlineUsersDebounced() {
   if (userUpdateDebounce.has("global")) {
@@ -127,7 +126,7 @@ app.prepare().then(() => {
     });
 
     // ==========================================
-    // ACTIVE USER IN CONVERSATION (dùng module đã import)
+    // ACTIVE USER IN CONVERSATION
     // ==========================================
     socket.on("enterConversation", ({ user_id, conversation_id }) => {
       activeUsers.setUserActiveInConversation(user_id, conversation_id, socket.id);
@@ -162,183 +161,80 @@ app.prepare().then(() => {
     });
 
     // ==========================================
-    // JOIN ROOM (UI purpose)
+    // JOIN/LEAVE ROOM
     // ==========================================
     socket.on("joinConversation", (data) => {
-  // ✅ Handle both string and object
-  const conversationId = typeof data === 'string' ? data : data.conversation_id;
-  const userId = typeof data === 'object' ? data.user_id : null;
-  
-  if (!conversationId) {
-    console.error("❌ Missing conversationId in joinConversation");
-    return;
-  }
+      const conversationId = typeof data === 'string' ? data : data.conversation_id;
+      const userId = typeof data === 'object' ? data.user_id : null;
+      
+      if (!conversationId) {
+        console.error("❌ Missing conversationId in joinConversation");
+        return;
+      }
 
-  const room = `conversation:${conversationId}`;
-  socket.join(room);
-  
-  console.log(`📥 Socket ${socket.id} (user: ${userId}) joined room: ${room}`);
-  
-  // ✅ Emit confirmation back to client
-  socket.emit("joinedConversation", { 
-    conversationId,
-    room,
-    success: true 
-  });
-});
+      const room = `conversation:${conversationId}`;
+      socket.join(room);
+      
+      console.log(`📥 Socket ${socket.id} (user: ${userId}) joined room: ${room}`);
+      
+      socket.emit("joinedConversation", { 
+        conversationId,
+        room,
+        success: true 
+      });
+    });
 
-socket.on("joinCallRoom", ({ callId, conversationId }) => {
-  if (!callId) {
-    console.error("❌ Missing callId in joinCallRoom");
-    socket.emit("error", { message: "callId is required" });
-    return;
-  }
+    socket.on("joinCallRoom", ({ callId, conversationId }) => {
+      if (!callId) {
+        console.error("❌ Missing callId in joinCallRoom");
+        socket.emit("error", { message: "callId is required" });
+        return;
+      }
 
-  const callRoom = `call:${callId}`;
-  socket.join(callRoom);
-  
-  console.log(`📞 Socket ${socket.id} joined call room: ${callRoom}`);
-  
-  // ✅ Emit confirmation back to client
-  socket.emit("joinedCallRoom", { 
-    callId,
-    callRoom,
-    conversationId,
-    success: true 
-  });
-});
+      const callRoom = `call:${callId}`;
+      socket.join(callRoom);
+      
+      console.log(`📞 Socket ${socket.id} joined call room: ${callRoom}`);
+      
+      socket.emit("joinedCallRoom", { 
+        callId,
+        callRoom,
+        conversationId,
+        success: true 
+      });
+    });
 
-socket.on("leaveCallRoom", ({ callId }) => {
-  if (!callId) {
-    console.error("❌ Missing callId in leaveCallRoom");
-    return;
-  }
+    socket.on("leaveCallRoom", ({ callId }) => {
+      if (!callId) {
+        console.error("❌ Missing callId in leaveCallRoom");
+        return;
+      }
 
-  const callRoom = `call:${callId}`;
-  socket.leave(callRoom);
-  
-  console.log(`📞 Socket ${socket.id} left call room: ${callRoom}`);
-  
-  socket.emit("leftCallRoom", { 
-    callId,
-    callRoom,
-    success: true 
-  });
-});
+      const callRoom = `call:${callId}`;
+      socket.leave(callRoom);
+      
+      console.log(`📞 Socket ${socket.id} left call room: ${callRoom}`);
+      
+      socket.emit("leftCallRoom", { 
+        callId,
+        callRoom,
+        success: true 
+      });
+    });
 
     // ==========================================
-    // HELPER FUNCTION
-    // ==========================================
-    function handleSocketEvent(eventName) {
-      socket.on(eventName, async (data) => {
-        try {
-          console.log(`📨 Event received: ${eventName}`, data);
-          socket.emit(`${eventName}Success`, {
-            message: `${eventName} event handled successfully`,
-            data: data,
-            timestamp: new Date(),
-          });
-        } catch (error) {
-          console.error(`❌ Error handling userTyping:`, error);
-        }
-      });
-      handleSocketEvent("stopTyping");
-
-      // Call, Friend, Conversation, Group, Reaction, Read Events
-      handleSocketEvent("startCall");
-      handleSocketEvent("startGroupCall");
-      handleSocketEvent("answerCall");
-      handleSocketEvent("declineCall");
-      handleSocketEvent("endCall");
-      handleSocketEvent("joinCall");
-      handleSocketEvent("leaveCall");
-      handleSocketEvent("getCallHistory");
-      handleSocketEvent("sendFriendRequest");
-      handleSocketEvent("acceptFriendRequest");
-      handleSocketEvent("declineFriendRequest");
-      handleSocketEvent("cancelFriendRequest");
-      handleSocketEvent("removeFriend");
-      handleSocketEvent("blockFriend");
-      handleSocketEvent("unblockFriend");
-      handleSocketEvent("getFriends");
-      handleSocketEvent("getFriendRequests");
-      handleSocketEvent("newConversation");
-      handleSocketEvent("updateConversation");
-      handleSocketEvent("deleteConversation");
-      handleSocketEvent("getConversations");
-      handleSocketEvent("getConversation");
-      handleSocketEvent("getConversationParticipants");
-      handleSocketEvent("createGroup");
-      handleSocketEvent("updateGroupInfo");
-      handleSocketEvent("addGroupMember");
-      handleSocketEvent("removeGroupMember");
-      handleSocketEvent("leaveGroup");
-      handleSocketEvent("deleteGroup");
-      handleSocketEvent("newReaction");
-      handleSocketEvent("deleteReaction");
-      handleSocketEvent("getReactions");
-      handleSocketEvent("getMessageReactions");
-      handleSocketEvent("markAsRead");
-      handleSocketEvent("deleteRead");
-      handleSocketEvent("getReads");
-      handleSocketEvent("getMessageReads");
-      handleSocketEvent("markConversationAsRead");
-      handleSocketEvent("getUnreadCount");
-
-      // Join/Leave Conversation
-      socket.on("joinConversation", (conversationId) => {
-        const roomName = `conversation:${conversationId}`;
-        socket.join(roomName);
-        console.log(
-          `📥 Socket ${socket.id} joined conversation room: ${roomName}`
-        );
-      });
-
-      socket.on("leaveConversation", (conversationId) => {
-        const roomName = `conversation:${conversationId}`;
-        socket.leave(roomName);
-        console.log(
-          `📤 Socket ${socket.id} left conversation room: ${roomName}`
-        );
-      });
-
-      // ==========================================
-      // 🆕 AI CHATBOT EVENTS
-      // ==========================================
-      socket.on("aiChatMessage", async (data) => {
-        try {
-          const { user_id, message, conversation_id, include_emotion } = data;
-          console.log(`🤖 AI Chat message from user ${user_id}:`, message);
-
-          socket.emit("aiTyping", {
-            conversation_id,
-            is_typing: true,
-          });
-
-          io.to(`user:${user_id}`).emit("aiChatMessageReceived", {
-            conversation_id,
-            user_message: message,
-            timestamp: new Date(),
-            status: "processing",
-          });
-
-          console.log(`✅ AI chat message acknowledged for user ${user_id}`);
-        } catch (error) {
-          console.error(`❌ Error handling aiChatMessage:`, error);
-          socket.emit("aiChatError", {
-            error: error.message,
-            timestamp: new Date(),
-          });
-        }
-      });
-
-    // ==========================================
-    // TYPING INDICATOR
+    // ✅ TYPING INDICATOR - FIXED
     // ==========================================
     socket.on("userTyping", ({ conversation_id, user_id, user_name, is_typing }) => {
-      const user = onlineUsers.find((u) => u.userId === user_id);
-      if (user) user.lastActive = Date.now();
+      console.log(`⌨️ [TYPING] User ${user_id} (${user_name}) typing: ${is_typing} in ${conversation_id}`);
 
+      // Update user activity
+      const user = onlineUsers.find((u) => u.userId === user_id);
+      if (user) {
+        user.lastActive = Date.now();
+      }
+
+      // Broadcast to ROOM (không gửi lại cho người gửi)
       socket.to(`conversation:${conversation_id}`).emit("userTyping", {
         conversation_id,
         user_id,
@@ -346,71 +242,12 @@ socket.on("leaveCallRoom", ({ callId }) => {
         is_typing,
         timestamp: new Date(),
       });
+
+      console.log(`✅ [TYPING] Broadcasted to room: conversation:${conversation_id}`);
     });
 
-    // Standard events
-    handleSocketEvent("callNotification");
-    handleSocketEvent("callAnswered");
-    handleSocketEvent("callDeclined");
-    handleSocketEvent("callEnded");
-    handleSocketEvent("callStarted");
-    handleSocketEvent("messageNotification");
-    handleSocketEvent("messageDelivered");
-    handleSocketEvent("messageRead");
-    handleSocketEvent("messageSent");
-    handleSocketEvent("friendRequestNotification");
-    handleSocketEvent("friendRequestAccepted");
-    handleSocketEvent("friendRequestCancelled");
-    handleSocketEvent("friendRequestDeclined");
-    handleSocketEvent("friendRequestSent");
-    handleSocketEvent("newMessage");
-    handleSocketEvent("sendMessage");
-    handleSocketEvent("editMessage");
-    handleSocketEvent("deleteMessage");
-    handleSocketEvent("getMessages");
-    handleSocketEvent("stopTyping");
-    handleSocketEvent("startCall");
-    handleSocketEvent("startGroupCall");
-    handleSocketEvent("answerCall");
-    handleSocketEvent("declineCall");
-    handleSocketEvent("endCall");
-    handleSocketEvent("joinCall");
-    handleSocketEvent("leaveCall");
-    handleSocketEvent("getCallHistory");
-    handleSocketEvent("sendFriendRequest");
-    handleSocketEvent("acceptFriendRequest");
-    handleSocketEvent("declineFriendRequest");
-    handleSocketEvent("cancelFriendRequest");
-    handleSocketEvent("removeFriend");
-    handleSocketEvent("blockFriend");
-    handleSocketEvent("unblockFriend");
-    handleSocketEvent("getFriends");
-    handleSocketEvent("getFriendRequests");
-    handleSocketEvent("newConversation");
-    handleSocketEvent("updateConversation");
-    handleSocketEvent("deleteConversation");
-    handleSocketEvent("getConversations");
-    handleSocketEvent("getConversation");
-    handleSocketEvent("getConversationParticipants");
-    handleSocketEvent("createGroup");
-    handleSocketEvent("updateGroupInfo");
-    handleSocketEvent("addGroupMember");
-    handleSocketEvent("removeGroupMember");
-    handleSocketEvent("leaveGroup");
-    handleSocketEvent("deleteGroup");
-    handleSocketEvent("newReaction");
-    handleSocketEvent("deleteReaction");
-    handleSocketEvent("getReactions");
-    handleSocketEvent("getMessageReactions");
-    handleSocketEvent("markAsRead");
-    handleSocketEvent("deleteRead");
-    handleSocketEvent("getReads");
-    handleSocketEvent("getMessageReads");
-    handleSocketEvent("markConversationAsRead");
-    handleSocketEvent("getUnreadCount");
-
     // ==========================================
-    // 🆕 AI CHATBOT EVENTS
+    // AI CHATBOT EVENTS
     // ==========================================
     socket.on("aiChatMessage", async (data) => {
       try {
@@ -570,7 +407,9 @@ socket.on("leaveCallRoom", ({ callId }) => {
       }
     });
 
-    // Test Events
+    // ==========================================
+    // TEST EVENTS
+    // ==========================================
     socket.on("test", (data) => {
       console.log("📨 Test event received:", data);
       socket.emit("testResponse", {
@@ -578,161 +417,14 @@ socket.on("leaveCallRoom", ({ callId }) => {
         timestamp: new Date(),
         receivedData: data,
       });
+    });
 
-      // ==========================================
-      // EMOTION ANALYSIS & RECOMMENDATIONS
-      // ==========================================
-      socket.on("emotionAnalysisComplete", async (data) => {
-        try {
-          const { user_id, message_id, emotion_data, is_sender, context } = data;
-          console.log(`😊 Emotion analysis complete for message ${message_id}`);
-
-          io.to(`user:${user_id}`).emit("emotionAnalyzed", {
-            message_id,
-            is_sender,
-            context,
-            emotion: emotion_data.dominant_emotion,
-            confidence: emotion_data.confidence_score,
-            all_scores: emotion_data.emotion_scores,
-            timestamp: new Date(),
-          });
-
-          console.log(`✅ Emotion analysis delivered to user ${user_id}`);
-        } catch (error) {
-          console.error(`❌ Error handling emotionAnalysisComplete:`, error);
-        }
+    socket.on("echo", (data) => {
+      console.log("🔄 Echo request:", data);
+      socket.emit("echoResponse", {
+        echo: data,
+        timestamp: new Date(),
       });
-
-      socket.on("requestEmotionRecommendations", async (data) => {
-        try {
-          const { user_id, emotion, confidence } = data;
-          console.log(`💡 Recommendations requested by user ${user_id}`);
-
-          socket.emit("recommendationsProcessing", {
-            user_id,
-            emotion,
-            status: "generating_ai_recommendations",
-            timestamp: new Date(),
-          });
-        } catch (error) {
-          console.error(`❌ Error handling requestEmotionRecommendations:`, error);
-        }
-      });
-
-      socket.on("sendRecommendations", async (data) => {
-        try {
-          const { user_id, emotion, recommendations, based_on } = data;
-          console.log(`💡 Sending AI recommendations to user ${user_id}`);
-
-          io.to(`user:${user_id}`).emit("emotionRecommendations", {
-            emotion,
-            recommendations,
-            based_on: {
-              ...based_on,
-              source: 'huggingface-ai',
-              generated_at: new Date(),
-            },
-            timestamp: new Date(),
-          });
-
-          console.log(`✅ AI recommendations delivered to user ${user_id}`);
-        } catch (error) {
-          console.error(`❌ Error handling sendRecommendations:`, error);
-        }
-      });
-
-      socket.on("emotionTrendsUpdate", async (data) => {
-        try {
-          const { user_id, trends, summary } = data;
-          console.log(`📊 Emotion trends update for user ${user_id}`);
-
-          io.to(`user:${user_id}`).emit("emotionTrendsUpdated", {
-            trends,
-            summary,
-            timestamp: new Date(),
-          });
-        } catch (error) {
-          console.error(`❌ Error handling emotionTrendsUpdate:`, error);
-        }
-      });
-
-      socket.on("bulkEmotionAnalysis", async (data) => {
-        try {
-          const { message_id, conversation_id, participants_data } = data;
-          console.log(`📊 Bulk emotion analysis for message ${message_id}`);
-
-          participants_data.forEach((participantData) => {
-            const { user_id, emotion, confidence, recommendations, is_sender } = participantData;
-            
-            io.to(`user:${user_id}`).emit("emotionAnalyzedWithRecommendations", {
-              message_id,
-              conversation_id,
-              is_sender,
-              emotion_data: { emotion, confidence },
-              recommendations: recommendations || [],
-              timestamp: new Date(),
-            });
-          });
-
-          console.log(`✅ Bulk emotion analysis completed`);
-        } catch (error) {
-          console.error(`❌ Error handling bulkEmotionAnalysis:`, error);
-        }
-      });
-
-      // Test Events
-      socket.on("test", (data) => {
-        console.log("📨 Test event received:", data);
-        socket.emit("testResponse", {
-          message: "Test successful!",
-          timestamp: new Date(),
-          receivedData: data,
-        });
-      });
-
-      socket.on("echo", (data) => {
-        console.log("🔄 Echo request:", data);
-        socket.emit("echoResponse", {
-          echo: data,
-          timestamp: new Date(),
-        });
-      });
-
-      // ==========================================
-      // DISCONNECT - IMPROVED WITH GRACE PERIOD
-      // ==========================================
-      socket.on("disconnect", () => {
-        console.log(`🔌 Socket disconnected: ${socket.id}`);
-
-        const disconnectedUser = onlineUsers.find(
-          (user) => user.socketId === socket.id
-        );
-        
-        if (disconnectedUser) {
-          const user_id = disconnectedUser.userId;
-          
-          // ✨ IMPROVED: Grace period before removing (for screen transitions)
-          setTimeout(() => {
-            // Check if user reconnected with a different socket
-            const currentUser = onlineUsers.find(u => u.userId === user_id);
-            
-            if (currentUser && currentUser.socketId === socket.id) {
-              // User didn't reconnect, remove them
-              onlineUsers = onlineUsers.filter(
-                (user) => user.socketId !== socket.id
-              );
-              console.log(`👋 User ${user_id} removed from online users`);
-              
-              global.onlineUsers = onlineUsers;
-              emitOnlineUsersDebounced();
-            } else {
-              console.log(`✅ User ${user_id} reconnected, keeping online status`);
-            }
-          }, DEBOUNCE_DELAY); // 2 second grace period
-        }
-      });
-
-      console.log("🤖 AI Emotion & Recommendation events registered");
     });
 
     // ==========================================
@@ -750,16 +442,16 @@ socket.on("leaveCallRoom", ({ callId }) => {
         const stillConnected = onlineUsers.find((u) => u.userId === user_id);
         if (stillConnected?.socketId === socket.id) {
           onlineUsers = onlineUsers.filter((u) => u.socketId !== socket.id);
-          activeUsers.removeUserFromAllConversations(user_id); // ✅ Xóa khỏi active conversations
+          activeUsers.removeUserFromAllConversations(user_id);
           console.log(`👋 User ${user_id} officially offline`);
           global.onlineUsers = onlineUsers;
           emitOnlineUsersDebounced();
         }
       }, DEBOUNCE_DELAY);
     });
-  
-    console.log("🤖 AI Emotion & Recommendation events registered");
-  }});
+
+    console.log("✅ All socket events registered");
+  });
 
   // Cleanup debounce timeouts
   process.on("SIGTERM", () => {
@@ -775,5 +467,6 @@ socket.on("leaveCallRoom", ({ callId }) => {
     console.log(`✅ Online status debouncing: ${DEBOUNCE_DELAY}ms grace period`);
     console.log(`🤖 AI Emotion Analysis: Enabled`);
     console.log(`✅ Active User Tracking: Enabled & Optimized`);
+    console.log(`⌨️ Typing Indicator: Fixed & Enabled`);
   });
 });

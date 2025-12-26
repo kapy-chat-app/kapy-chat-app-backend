@@ -1017,7 +1017,7 @@ export async function deleteMessage(
 }
 
 // ============================================
-// ADD REACTION - OPTIMIZED
+// ADD REACTION - FIXED WITH SOCKET EMIT
 // ============================================
 export async function addReaction(
   messageId: string,
@@ -1101,20 +1101,25 @@ export async function addReaction(
       created_at: r.created_at,
     }));
 
-    // Emit socket event
+    // ✅ CRITICAL FIX: Emit socket event
+    console.log(`🎭 [REACTION] Emitting newReaction event for message ${messageId}`);
+    
     await emitSocketEvent(
       "newReaction",
       message.conversation.toString(),
       {
         message_id: messageId,
+        conversation_id: message.conversation.toString(),
         user_id: user.clerkId,
         user_name: user.full_name,
         user_avatar: user.avatar,
-        reaction: reactionType,
-        reactions: transformedReactions,
+        reaction_type: reactionType,
+        reactions: transformedReactions, // ✅ Send full reactions array
       },
-      false
+      true // ✅ Emit to participants
     );
+
+    console.log(`✅ [REACTION] Socket event emitted successfully`);
 
     return {
       success: true,
@@ -1124,7 +1129,7 @@ export async function addReaction(
       },
     };
   } catch (error) {
-    console.error("Error adding reaction:", error);
+    console.error("❌ Error adding reaction:", error);
     return {
       success: false,
       error: error instanceof Error ? error.message : "Failed to add reaction",
@@ -1133,7 +1138,7 @@ export async function addReaction(
 }
 
 // ============================================
-// REMOVE REACTION - OPTIMIZED
+// REMOVE REACTION - FIXED WITH SOCKET EMIT
 // ============================================
 export async function removeReaction(messageId: string) {
   try {
@@ -1159,7 +1164,7 @@ export async function removeReaction(messageId: string) {
     );
     if (!isParticipant) throw new Error("Not a participant");
 
-    // Find user's reaction before removing
+    // Find user's reaction before removing (for logging)
     const userReaction = message.reactions.find(
       (r: any) => r.user.toString() === user._id.toString()
     );
@@ -1192,19 +1197,24 @@ export async function removeReaction(messageId: string) {
       created_at: r.created_at,
     }));
 
-    // Emit socket event
+    // ✅ CRITICAL FIX: Emit socket event
+    console.log(`🎭 [REACTION] Emitting deleteReaction event for message ${messageId}`);
+    
     await emitSocketEvent(
       "deleteReaction",
       message.conversation.toString(),
       {
         message_id: messageId,
+        conversation_id: message.conversation.toString(),
         user_id: user.clerkId,
         user_name: user.full_name,
-        reaction: userReaction?.type,
-        reactions: transformedReactions,
+        removed_reaction_type: userReaction?.type,
+        reactions: transformedReactions, // ✅ Send updated reactions array
       },
-      false
+      true // ✅ Emit to participants
     );
+
+    console.log(`✅ [REACTION] Socket event emitted successfully`);
 
     return {
       success: true,
@@ -1214,7 +1224,7 @@ export async function removeReaction(messageId: string) {
       },
     };
   } catch (error) {
-    console.error("Error removing reaction:", error);
+    console.error("❌ Error removing reaction:", error);
     return {
       success: false,
       error:
@@ -1313,7 +1323,7 @@ export async function getUsersWhoReacted(
 }
 
 // ============================================
-// TOGGLE REACTION - NEW (Convenience method)
+// TOGGLE REACTION - UPDATED (uses fixed add/remove)
 // ============================================
 export async function toggleReaction(
   messageId: string,
@@ -1336,15 +1346,20 @@ export async function toggleReaction(
         r.user.toString() === user._id.toString() && r.type === reactionType
     );
 
+    console.log(`🎭 [TOGGLE] Message ${messageId}, User ${userId}, Reaction ${reactionType}`);
+    console.log(`   Existing reaction: ${existingReaction ? 'YES' : 'NO'}`);
+
     if (existingReaction) {
       // Remove reaction if it exists
+      console.log(`   → Removing reaction`);
       return await removeReaction(messageId);
     } else {
       // Add reaction if it doesn't exist
+      console.log(`   → Adding reaction`);
       return await addReaction(messageId, reactionType);
     }
   } catch (error) {
-    console.error("Error toggling reaction:", error);
+    console.error("❌ Error toggling reaction:", error);
     return {
       success: false,
       error:

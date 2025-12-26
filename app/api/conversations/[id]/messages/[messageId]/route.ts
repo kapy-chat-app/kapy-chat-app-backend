@@ -1,4 +1,4 @@
-// app/api/messages/[messageId]/route.ts - UPDATED WITH REACTIONS
+// app/api/conversations/[id]/messages/[messageId]/route.ts - UPDATED WITH REACTIONS
 import { ReactionType } from "@/dtos/message.dto";
 import {
   updateMessage,
@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+   { params }: { params: Promise<{ messageId: string }> }
 ) {
   try {
     const body = await req.json();
@@ -107,7 +107,7 @@ export async function PUT(
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+  { params }: { params: Promise<{ messageId: string }> } 
 ) {
   try {
     const { searchParams } = new URL(req.url);
@@ -160,7 +160,7 @@ export async function DELETE(
 // ==========================================
 export async function GET(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+  { params }: { params: Promise<{ messageId: string }> } 
 ) {
   try {
     const { searchParams } = new URL(req.url);
