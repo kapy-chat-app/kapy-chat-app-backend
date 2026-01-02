@@ -9,21 +9,40 @@ import {
   toggleReaction,
   getReactionCounts,
   getUsersWhoReacted,
+  recallMessage,
 } from "@/lib/actions/message.action";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function PUT(
   req: NextRequest,
-   { params }: { params: Promise<{ messageId: string }> }
+  { params }: { params: Promise<{ messageId: string }> }
 ) {
   try {
     const body = await req.json();
-
+    const { messageId } = await params;
     // ==========================================
     // ✅ EDIT MESSAGE
     // ==========================================
     if (body.action === "edit" && body.content) {
-      const result = await updateMessage(params.messageId, body.content);
+      const result = await updateMessage(
+        messageId,
+        body.content || "",
+        body.encryptedContent,
+        body.encryptionMetadata
+      );
+
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: result.data,
+        timestamp: new Date(),
+      });
+    }
+    if (body.action === "recall") {
+      const result = await recallMessage(messageId);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -107,7 +126,7 @@ export async function PUT(
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: Promise<{ messageId: string }> } 
+  { params }: { params: Promise<{ messageId: string }> }
 ) {
   try {
     const { searchParams } = new URL(req.url);
@@ -160,7 +179,7 @@ export async function DELETE(
 // ==========================================
 export async function GET(
   req: NextRequest,
-  { params }: { params: Promise<{ messageId: string }> } 
+  { params }: { params: Promise<{ messageId: string }> }
 ) {
   try {
     const { searchParams } = new URL(req.url);

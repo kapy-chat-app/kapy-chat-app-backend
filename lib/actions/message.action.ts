@@ -902,7 +902,12 @@ export async function getRichMediaStats(
 // ============================================
 // UPDATE MESSAGE
 // ============================================
-export async function updateMessage(messageId: string, content: string) {
+export async function updateMessage(
+  messageId: string,
+  content: string,
+  encryptedContent?: string,
+  encryptionMetadata?: any
+) {
   try {
     await connectToDatabase();
     const { userId } = await auth();
@@ -918,41 +923,212 @@ export async function updateMessage(messageId: string, content: string) {
       throw new Error("Only sender can edit message");
     }
 
+    // ✅ Update với E2EE support
+    const updateData: any = {
+      content: content?.trim(),
+      is_edited: true,
+      edited_at: new Date(),
+    };
+
+    // ✅ Nếu có encrypted content thì update
+    if (encryptedContent) {
+      updateData.encrypted_content = encryptedContent;
+    }
+
+    if (encryptionMetadata) {
+      updateData.encryption_metadata = encryptionMetadata;
+    }
+
     const updatedMessage = await Message.findByIdAndUpdate(
       messageId,
-      {
-        content: content.trim(),
-        is_edited: true,
-        edited_at: new Date(),
-      },
+      updateData,
       { new: true }
-    )
-      .populate({
-        path: "sender",
-        select: "clerkId full_name username avatar",
-        populate: { path: "avatar", select: "url" },
-      })
-      .populate("attachments", "file_name file_type file_size url")
-      .populate({
-        path: "read_by.user",
-        select: "clerkId full_name username avatar",
-        populate: { path: "avatar", select: "url" },
-      });
+    );
 
-    await emitSocketEvent("updateMessage", message.conversation.toString(), {
-      message_id: messageId,
-      user_id: userId,
-      new_content: content.trim(),
-      edited_by: userId,
-      edited_at: new Date(),
-    });
+    // ✅ Populate đầy đủ như khi create
+    const populatedMessage = await Message.aggregate([
+      { $match: { _id: updatedMessage?._id } },
+      // Lookup sender
+      {
+        $lookup: {
+          from: "users",
+          let: { senderId: "$sender" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$senderId"] } } },
+            {
+              $lookup: {
+                from: "files",
+                localField: "avatar",
+                foreignField: "_id",
+                as: "avatarData",
+              },
+            },
+            {
+              $project: {
+                clerkId: 1,
+                full_name: 1,
+                username: 1,
+                avatar: { $arrayElemAt: ["$avatarData.url", 0] },
+              },
+            },
+          ],
+          as: "senderData",
+        },
+      },
+      // Lookup attachments
+      {
+        $lookup: {
+          from: "files",
+          localField: "attachments",
+          foreignField: "_id",
+          as: "attachments",
+          pipeline: [
+            {
+              $project: {
+                _id: 1,
+                file_name: 1,
+                file_type: 1,
+                file_size: 1,
+                url: 1,
+                cloudinary_public_id: 1,
+                is_encrypted: 1,
+                encryption_metadata: 1,
+              },
+            },
+          ],
+        },
+      },
+      // Lookup reactions
+      {
+        $lookup: {
+          from: "users",
+          let: { reactionUsers: "$reactions.user" },
+          pipeline: [
+            { $match: { $expr: { $in: ["$_id", "$$reactionUsers"] } } },
+            {
+              $lookup: {
+                from: "files",
+                localField: "avatar",
+                foreignField: "_id",
+                as: "avatarData",
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                clerkId: 1,
+                full_name: 1,
+                username: 1,
+                avatar: { $arrayElemAt: ["$avatarData.url", 0] },
+              },
+            },
+          ],
+          as: "reactionUsersData",
+        },
+      },
+      // Format output
+      {
+        $project: {
+          _id: 1,
+          conversation: 1,
+          content: 1,
+          encrypted_content: 1,
+          encryption_metadata: 1,
+          type: 1,
+          is_edited: 1,
+          edited_at: 1,
+          created_at: 1,
+          updated_at: 1,
+          sender: { $arrayElemAt: ["$senderData", 0] },
+          attachments: 1,
+          reactions: {
+            $map: {
+              input: "$reactions",
+              as: "r",
+              in: {
+                user: {
+                  $let: {
+                    vars: {
+                      matchedUser: {
+                        $arrayElemAt: [
+                          {
+                            $filter: {
+                              input: "$reactionUsersData",
+                              as: "u",
+                              cond: { $eq: ["$$u._id", "$$r.user"] },
+                            },
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                    in: {
+                      _id: "$$matchedUser._id",
+                      clerkId: "$$matchedUser.clerkId",
+                      full_name: "$$matchedUser.full_name",
+                      username: "$$matchedUser.username",
+                      avatar: "$$matchedUser.avatar",
+                    },
+                  },
+                },
+                type: "$$r.type",
+                created_at: "$$r.created_at",
+              },
+            },
+          },
+          read_by: 1,
+        },
+      },
+    ]);
+
+    const messageObj = populatedMessage[0];
+    if (!messageObj) {
+      throw new Error("Failed to retrieve updated message");
+    }
+
+    // ✅ Convert IDs to strings
+    messageObj._id = messageObj._id.toString();
+    if (messageObj.attachments) {
+      messageObj.attachments = messageObj.attachments.map((att: any) => ({
+        ...att,
+        _id: att._id.toString(),
+      }));
+    }
+
+    // ✅ Emit socket event với FULL message data
+    await emitSocketEvent(
+      "updateMessage",
+      message.conversation.toString(),
+      {
+        message_id: messageId,
+        conversation_id: message.conversation.toString(),
+        user_id: userId,
+        edited_by: userId,
+        edited_at: new Date(),
+        // ✅ CRITICAL: Gửi FULL message object
+        message: {
+          ...messageObj,
+          content: content?.trim(),
+          encrypted_content: encryptedContent,
+          encryption_metadata: encryptionMetadata,
+        },
+      },
+      true // ✅ Emit to participants
+    );
+
+    console.log(`✅ [UPDATE] Message ${messageId} updated and broadcasted`);
 
     return {
       success: true,
-      data: updatedMessage,
+      data: {
+        ...messageObj,
+        content: content?.trim(),
+        encrypted_content: encryptedContent,
+        encryption_metadata: encryptionMetadata,
+      },
     };
   } catch (error) {
-    console.error("Error updating message:", error);
+    console.error("❌ Error updating message:", error);
     return {
       success: false,
       error:
@@ -1015,7 +1191,123 @@ export async function deleteMessage(
     };
   }
 }
+// ✅ NEW: RECALL MESSAGE (thu hồi tin nhắn)
+export async function recallMessage(messageId: string) {
+  try {
+    await connectToDatabase();
+    const { userId } = await auth();
+    if (!userId) throw new Error("Unauthorized");
 
+    const user = await User.findOne({ clerkId: userId });
+    if (!user) throw new Error("User not found");
+
+    const message = await Message.findById(messageId);
+    if (!message) throw new Error("Message not found");
+
+    // ✅ Only sender can recall
+    if (message.sender.toString() !== user._id.toString()) {
+      throw new Error("Only sender can recall message");
+    }
+
+    // ✅ Mark as recalled for EVERYONE (delete_type: "both")
+    await Message.findByIdAndUpdate(messageId, {
+      $addToSet: {
+        deleted_by: {
+          user: user._id,
+          deleted_at: new Date(),
+          delete_type: "both",
+        },
+      },
+      // ✅ Set metadata to indicate this is a recalled message
+      $set: {
+        "metadata.isRecalled": true,
+        "metadata.recalledAt": new Date(),
+        "metadata.recalledBy": user._id,
+      },
+    });
+
+    // ✅ Populate full message for socket
+    const updatedMessage = await Message.aggregate([
+      { $match: { _id: message._id } },
+      {
+        $lookup: {
+          from: "users",
+          let: { senderId: "$sender" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$senderId"] } } },
+            {
+              $lookup: {
+                from: "files",
+                localField: "avatar",
+                foreignField: "_id",
+                as: "avatarData",
+              },
+            },
+            {
+              $project: {
+                clerkId: 1,
+                full_name: 1,
+                username: 1,
+                avatar: { $arrayElemAt: ["$avatarData.url", 0] },
+              },
+            },
+          ],
+          as: "senderData",
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          conversation: 1,
+          sender: { $arrayElemAt: ["$senderData", 0] },
+          type: 1,
+          metadata: 1,
+          created_at: 1,
+          updated_at: 1,
+          deleted_by: 1,
+        },
+      },
+    ]);
+
+    const messageObj = updatedMessage[0];
+
+    // ✅ Emit socket event - RECALL MESSAGE
+    await emitSocketEvent(
+      "recallMessage",
+      message.conversation.toString(),
+      {
+        message_id: messageId,
+        conversation_id: message.conversation.toString(),
+        user_id: userId,
+        recalled_by: user.full_name,
+        recalled_at: new Date(),
+        message: {
+          ...messageObj,
+          _id: messageObj._id.toString(),
+        },
+      },
+      true // ✅ Emit to all participants
+    );
+
+    console.log(`✅ [RECALL] Message ${messageId} recalled by ${userId}`);
+
+    return {
+      success: true,
+      data: { 
+        messageId, 
+        recalledBy: user.full_name,
+        recalledAt: new Date(),
+      },
+    };
+  } catch (error) {
+    console.error("❌ Error recalling message:", error);
+    return {
+      success: false,
+      error:
+        error instanceof Error ? error.message : "Failed to recall message",
+    };
+  }
+}
 // ============================================
 // ADD REACTION - FIXED WITH SOCKET EMIT
 // ============================================

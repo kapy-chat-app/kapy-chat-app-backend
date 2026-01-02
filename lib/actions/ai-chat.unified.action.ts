@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/actions/ai-chat.unified.action.ts - UNIFIED VERSION
+// src/actions/ai-chat.unified.action.ts - FIXED VERSION
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
@@ -133,6 +133,11 @@ export async function sendAIMessage(data: {
       language,
     } = data;
 
+    // ✅ Validate message
+    if (!message || message.trim().length === 0) {
+      throw new Error("Message cannot be empty");
+    }
+
     // Generate conversation ID
     const chatConvId = conversationId || `ai_chat_${user._id}_${Date.now()}`;
 
@@ -198,13 +203,31 @@ export async function sendAIMessage(data: {
       timestamp: new Date(),
     });
 
-    // Get AI response with emotion-aware context
-    const conversationHistory = chatHistory.messages
-      .slice(-10)
-      .map((m: any) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }));
+    // ✅ FIX: Get conversation history and remove duplicates
+    const allMessages = chatHistory.messages.slice(-10);
+    
+    // Remove consecutive duplicate messages
+    const conversationHistory: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (let i = 0; i < allMessages.length; i++) {
+      const msg = allMessages[i];
+      const lastMsg = conversationHistory[conversationHistory.length - 1];
+      
+      // Skip if same role and same content as previous
+      if (lastMsg && lastMsg.role === msg.role && lastMsg.content === msg.content) {
+        console.log("⚠️ Skipping duplicate message:", msg.content.substring(0, 30));
+        continue;
+      }
+      
+      conversationHistory.push({
+        role: msg.role as "user" | "assistant",
+        content: msg.content,
+      });
+    }
+
+    console.log("📝 Conversation history:", conversationHistory.map(m => ({
+      role: m.role,
+      content: m.content.substring(0, 30) + "..."
+    })));
 
     const { response: aiResponse, detectedLanguage } =
       await geminiService.chat(
@@ -213,6 +236,11 @@ export async function sendAIMessage(data: {
         emotionContext,
         language || chatHistory.metadata?.language_preference
       );
+
+    // ✅ Validate AI response
+    if (!aiResponse || aiResponse.trim().length === 0) {
+      throw new Error("AI returned empty response");
+    }
 
     // Update language preference
     if (!chatHistory.metadata) chatHistory.metadata = {};
@@ -255,7 +283,7 @@ export async function sendAIMessage(data: {
       timestamp: new Date(),
     });
 
-    console.log(`✅ AI response sent (${detectedLanguage})`);
+    console.log(`✅ AI response sent (${detectedLanguage}):`, aiResponse.substring(0, 50));
 
     return {
       success: true,
@@ -503,6 +531,79 @@ export async function getEmotionRecommendation(
       success: false,
       error:
         error instanceof Error ? error.message : "Failed to get recommendation",
+    };
+  }
+}
+
+// ============================================
+// 💡 GET SMART SUGGESTIONS (NEW)
+// ============================================
+export async function getSmartSuggestions(data?: {
+  language?: "vi" | "en" | "zh";
+  limit?: number;
+}) {
+  try {
+    await connectToDatabase();
+    const { userId } = await auth();
+    if (!userId) throw new Error("Unauthorized");
+
+    const user = await User.findOne({ clerkId: userId });
+    if (!user) throw new Error("User not found");
+
+    const { language = "vi", limit = 4 } = data || {};
+
+    // 1️⃣ Lấy lịch sử chat gần nhất (5 conversations)
+    const recentChats = await AIChatHistory.find({ user: user._id })
+      .sort({ updated_at: -1 })
+      .limit(5)
+      .select("messages metadata")
+      .lean();
+
+    // 2️⃣ Lấy cảm xúc gần nhất (20 records)
+    const emotionContext = await getUserEmotionContext(user._id);
+
+    // 3️⃣ Tạo context cho AI
+    const chatTopics = recentChats
+      .flatMap((chat: any) => 
+        chat.messages
+          .filter((m: any) => m.role === "user")
+          .slice(-3)
+          .map((m: any) => m.content)
+      )
+      .slice(0, 10);
+
+    // 4️⃣ Gọi Gemini để tạo suggestions
+    const suggestions = await geminiService.generateSmartSuggestions(
+      {
+        recentTopics: chatTopics,
+        emotionContext: emotionContext,
+        language,
+        limit,
+      }
+    );
+
+    return {
+      success: true,
+      data: {
+        suggestions,
+        emotion_context: emotionContext
+          ? {
+              dominant_emotion: emotionContext.dominantEmotion,
+              intensity: emotionContext.emotionIntensity,
+            }
+          : null,
+        language,
+        generated_at: new Date(),
+      },
+    };
+  } catch (error) {
+    console.error("❌ Error getting smart suggestions:", error);
+    return {
+      success: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Failed to get suggestions",
     };
   }
 }

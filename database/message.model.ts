@@ -45,7 +45,7 @@ export interface IMessage extends Document {
   // ✨ UPDATED: Proper typing for metadata
   metadata?: {
     isSystemMessage?: boolean;
-    action?: 
+    action?:
       | "create_group"
       | "add_participants"
       | "remove_participant"
@@ -78,9 +78,22 @@ export interface IMessage extends Document {
 
   // Instance methods
   markAsRead(userId: string): Promise<IMessage>;
-  addReaction(userId: string, reactionType: "heart" | "like" | "sad" | "angry" | "laugh" | "wow" | "dislike"): Promise<IMessage>;
+  addReaction(
+    userId: string,
+    reactionType:
+      | "heart"
+      | "like"
+      | "sad"
+      | "angry"
+      | "laugh"
+      | "wow"
+      | "dislike"
+  ): Promise<IMessage>;
   removeReaction(userId: string): Promise<IMessage>;
-  deleteForUser(userId: string, deleteType: "both" | "only_me"): Promise<IMessage>;
+  deleteForUser(
+    userId: string,
+    deleteType: "both" | "only_me"
+  ): Promise<IMessage>;
   isDeletedForUser(userId: string): boolean;
   getDeleteTypeForUser(userId: string): "both" | "only_me" | null;
   getReactionByUser(userId: string): any;
@@ -88,7 +101,11 @@ export interface IMessage extends Document {
   recallMessage(userId: string): Promise<IMessage>;
   getMediaUrl(): string | null;
   getPreviewUrl(): string | null;
-  getProviderInfo(): { provider: string; provider_id: string; url: string } | null;
+  getProviderInfo(): {
+    provider: string;
+    provider_id: string;
+    url: string;
+  } | null;
   // ✨ NEW: Check if message is system message
   isSystemMessage(): boolean;
 }
@@ -101,23 +118,23 @@ export interface IMessageModel extends Model<IMessage> {
     page?: number,
     limit?: number
   ): Promise<IMessage[]>;
-  
+
   getDeletedMessagesForUser(userId: string): Promise<IMessage[]>;
-  
+
   getRecalledMessages(conversationId?: string): Promise<IMessage[]>;
-  
+
   getPopularRichMedia(
     conversationId: string,
     type: "gif" | "sticker",
     provider?: string,
     limit?: number
   ): Promise<any[]>;
-  
+
   getRichMediaStats(
     conversationId?: string,
     type?: "gif" | "sticker"
   ): Promise<any[]>;
-  
+
   // ✨ NEW: Create system message helper
   createSystemMessage(
     conversationId: string,
@@ -238,23 +255,40 @@ MessageSchema.pre("save", function (next) {
   if (this.type === "text") {
     // ✅ UPDATED: System messages don't need content validation
     if (!this.metadata?.isSystemMessage) {
-      if (!this.encrypted_content && !this.content && this.attachments.length === 0) {
+      if (
+        !this.encrypted_content &&
+        !this.content &&
+        this.attachments.length === 0
+      ) {
         return next(
-          new Error("Text messages must have encrypted_content, content, or attachments")
+          new Error(
+            "Text messages must have encrypted_content, content, or attachments"
+          )
         );
       }
     }
   }
 
   if (this.type === "gif" || this.type === "sticker") {
-    if (!this.rich_media || !this.rich_media.provider || !this.rich_media.media_url) {
+    if (
+      !this.rich_media ||
+      !this.rich_media.provider ||
+      !this.rich_media.media_url
+    ) {
       return next(
-        new Error(`${this.type} messages must have valid rich_media with provider and media_url`)
+        new Error(
+          `${this.type} messages must have valid rich_media with provider and media_url`
+        )
       );
     }
   }
 
-  if (this.type !== "text" && this.type !== "call_log" && this.type !== "gif" && this.type !== "sticker") {
+  if (
+    this.type !== "text" &&
+    this.type !== "call_log" &&
+    this.type !== "gif" &&
+    this.type !== "sticker"
+  ) {
     if (this.attachments.length === 0 && !this.metadata) {
       return next(
         new Error("Non-text messages must have attachments or metadata")
@@ -552,6 +586,7 @@ MessageSchema.statics.createSystemMessage = async function (
   return systemMessage.save();
 };
 
-const Message = (models.Message || model<IMessage, IMessageModel>("Message", MessageSchema)) as IMessageModel;
+const Message = (models.Message ||
+  model<IMessage, IMessageModel>("Message", MessageSchema)) as IMessageModel;
 
 export default Message;
