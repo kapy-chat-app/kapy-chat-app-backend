@@ -133,17 +133,16 @@ export async function sendAIMessage(data: {
       language,
     } = data;
 
-    // ✅ Validate message
     if (!message || message.trim().length === 0) {
       throw new Error("Message cannot be empty");
     }
 
-    // Generate conversation ID
+    // ✅ Generate conversation ID FIRST (before any socket emit)
     const chatConvId = conversationId || `ai_chat_${user._id}_${Date.now()}`;
 
-    // 🔔 Emit: AI is typing
+    // 🔔 Emit: AI is typing (WITH conversation_id)
     await emitToUserRoom("aiTyping", user.clerkId, {
-      conversation_id: chatConvId,
+      conversation_id: chatConvId, // ✅ Include conversation_id
       is_typing: true,
     });
 
@@ -166,7 +165,7 @@ export async function sendAIMessage(data: {
       });
     }
 
-    // Get emotion context with full details
+    // Get emotion context
     let emotionContext;
     let currentEmotionData;
     if (includeEmotionContext) {
@@ -185,7 +184,6 @@ export async function sendAIMessage(data: {
           avg_confidence: emotionContext.avgConfidence,
         };
 
-        // Check for emotion alert
         await checkEmotionAlert(
           user.clerkId,
           emotionContext.dominantEmotion,
@@ -203,16 +201,14 @@ export async function sendAIMessage(data: {
       timestamp: new Date(),
     });
 
-    // ✅ FIX: Get conversation history and remove duplicates
+    // Clean conversation history
     const allMessages = chatHistory.messages.slice(-10);
     
-    // Remove consecutive duplicate messages
     const conversationHistory: Array<{ role: "user" | "assistant"; content: string }> = [];
     for (let i = 0; i < allMessages.length; i++) {
       const msg = allMessages[i];
       const lastMsg = conversationHistory[conversationHistory.length - 1];
       
-      // Skip if same role and same content as previous
       if (lastMsg && lastMsg.role === msg.role && lastMsg.content === msg.content) {
         console.log("⚠️ Skipping duplicate message:", msg.content.substring(0, 30));
         continue;
@@ -237,7 +233,6 @@ export async function sendAIMessage(data: {
         language || chatHistory.metadata?.language_preference
       );
 
-    // ✅ Validate AI response
     if (!aiResponse || aiResponse.trim().length === 0) {
       throw new Error("AI returned empty response");
     }
@@ -268,15 +263,15 @@ export async function sendAIMessage(data: {
 
     await chatHistory.save();
 
-    // 🔔 Stop typing
+    // ✅ Stop typing (WITH conversation_id)
     await emitToUserRoom("aiTyping", user.clerkId, {
-      conversation_id: chatConvId,
+      conversation_id: chatConvId, // ✅ Include conversation_id
       is_typing: false,
     });
 
-    // 🔔 Send AI response with emotion context
+    // ✅ Send AI response (WITH all required data)
     await emitToUserRoom("aiChatResponse", user.clerkId, {
-      conversation_id: chatConvId,
+      conversation_id: chatConvId, // ✅ CRITICAL: Must include this!
       message: aiResponse,
       language: detectedLanguage,
       emotion_context: currentEmotionData,

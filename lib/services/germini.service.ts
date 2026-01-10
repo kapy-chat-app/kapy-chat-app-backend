@@ -356,67 +356,177 @@ ${
   }
 
   async analyzeAndRecommend(
-    emotionContext: EmotionContext,
-    language: "vi" | "en" | "zh" = "vi"
-  ): Promise<{
+  emotionContext: any,
+  language: "vi" | "en" | "zh" = "vi"
+): Promise<{
+  recommendation: string;
+  supportMessage: string;
+  actionSuggestion?: string;
+}> {
+  const cacheKey = `recommend_${
+    emotionContext.dominantEmotion
+  }_${language}_${Math.floor(emotionContext.emotionIntensity * 10)}`;
+  
+  const cached = this.getCached<{
     recommendation: string;
     supportMessage: string;
     actionSuggestion?: string;
-  }> {
-    const cacheKey = `recommend_${
-      emotionContext.dominantEmotion
-    }_${language}_${Math.floor(emotionContext.emotionIntensity * 10)}`;
-    const cached = this.getCached<{
-      recommendation: string;
-      supportMessage: string;
-      actionSuggestion?: string;
-    }>(cacheKey);
-    if (cached) return cached;
+  }>(cacheKey);
+  if (cached) return cached;
 
-    const { recentEmotions, dominantEmotion, emotionIntensity } =
-      emotionContext;
-    const emotionTimeline = recentEmotions
-      .slice(0, 5)
-      .map((e) => `${e.emotion} (${(e.confidence * 100).toFixed(0)}%)`)
-      .join(" → ");
+  const { recentEmotions, dominantEmotion, emotionIntensity, negativeRatio } = emotionContext;
+  
+  const emotionTimeline = recentEmotions
+    .slice(0, 5)
+    .map((e: any) => `${e.emotion} (${(e.confidence * 100).toFixed(0)}%)`)
+    .join(" → ");
 
-    const prompts: Record<string, string> = {
-      vi: `Phân tích chi tiết: ${dominantEmotion} (${(
-        emotionIntensity * 100
-      ).toFixed(
-        0
-      )}%). Xu hướng: ${emotionTimeline}. Đưa ra lời khuyên chi tiết, ấm áp và thấu hiểu, 3-4 câu cho mỗi phần.`,
-      en: `Detailed analysis: ${dominantEmotion} (${(
-        emotionIntensity * 100
-      ).toFixed(
-        0
-      )}%). Trend: ${emotionTimeline}. Give warm, understanding and detailed advice, 3-4 sentences for each part.`,
-      zh: `详细分析：${dominantEmotion} (${(emotionIntensity * 100).toFixed(
-        0
-      )}%). 趋势：${emotionTimeline}. 给出温暖、理解和详细的建议，每部分3-4句话。`,
+  // ✅ SIMPLIFIED PROMPT - Shorter and clearer
+  const prompts: Record<string, string> = {
+    vi: `Phân tích cảm xúc: ${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+
+Viết 3 câu ngắn (mỗi câu 15-20 từ):
+
+1. PHÂN TÍCH: [Nhận xét về cảm xúc hiện tại]
+2. ĐỘNG VIÊN: [Lời động viên ấm áp]  
+3. HÀNH ĐỘNG: [Gợi ý hành động cụ thể]
+
+Chỉ viết 3 câu, mỗi dòng một câu, kết thúc bằng dấu chấm.`,
+
+    en: `Emotion analysis: ${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+
+Write 3 short sentences (15-20 words each):
+
+1. ANALYSIS: [Comment on current emotion]
+2. ENCOURAGEMENT: [Warm encouragement]
+3. ACTION: [Specific action suggestion]
+
+Only 3 sentences, one per line, end with period.`,
+
+    zh: `情绪分析：${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+
+写3个简短句子（每句15-20字）：
+
+1. 分析：[对当前情绪的评论]
+2. 鼓励：[温暖的鼓励]
+3. 行动：[具体的行动建议]
+
+只写3句话，每行一句，以句号结束。`,
+  };
+
+  const result = await this.retryWithBackoff(async () => {
+    console.log("🤖 Calling Gemini for emotion recommendations...");
+    
+    const result = await this.model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompts[language] }] }],
+      generationConfig: {
+        temperature: 0.6, // ✅ Lower for consistency
+        maxOutputTokens: 512, // ✅ Sufficient for 3 short sentences
+        topP: 0.85,
+        topK: 40,
+        stopSequences: [], // ✅ No early stopping
+      },
+      // ✅ ADD SAFETY SETTINGS to prevent blocking
+      safetySettings: [
+        {
+          category: "HARM_CATEGORY_HARASSMENT",
+          threshold: "BLOCK_NONE",
+        },
+        {
+          category: "HARM_CATEGORY_HATE_SPEECH",
+          threshold: "BLOCK_NONE",
+        },
+        {
+          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          threshold: "BLOCK_NONE",
+        },
+        {
+          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+          threshold: "BLOCK_NONE",
+        },
+      ],
+    });
+    
+    let response = result.response.text().trim();
+    console.log("🤖 Gemini raw response:", response);
+    console.log("🤖 Response length:", response.length);
+
+    // ✅ SIMPLE LINE-BASED PARSING
+    const lines = response
+      .split("\n")
+      .map((l) => l.trim())
+      // Remove numbering and labels
+      .map((l) => 
+        l.replace(/^\d+\.\s*/, "")
+         .replace(/^(PHÂN TÍCH|ĐỘNG VIÊN|HÀNH ĐỘNG|ANALYSIS|ENCOURAGEMENT|ACTION|分析|鼓励|行动)[:：]\s*/i, "")
+         .replace(/^\[.*?\]\s*/, "")
+      )
+      .filter((l) => l.length > 10);
+
+    console.log("🤖 Parsed lines:", lines);
+
+    let recommendation = lines[0] || "";
+    let supportMessage = lines[1] || "";
+    let actionSuggestion = lines[2] || "";
+
+    // ✅ ENSURE COMPLETE SENTENCES
+    const ensureComplete = (text: string): string => {
+      if (!text) return text;
+      text = text.trim();
+      
+      // If incomplete (doesn't end with punctuation), try to salvage
+      if (!/[.!?។]$/.test(text)) {
+        const lastPunct = Math.max(
+          text.lastIndexOf("."),
+          text.lastIndexOf("!"),
+          text.lastIndexOf("?")
+        );
+        
+        if (lastPunct > 15) {
+          text = text.substring(0, lastPunct + 1);
+        } else if (text.length > 15) {
+          text += ".";
+        } else {
+          return ""; // Too short, will use fallback
+        }
+      }
+      
+      return text;
     };
 
-    const result = await this.retryWithBackoff(async () => {
-      const result = await this.model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompts[language] }] }],
-        generationConfig: {
-          temperature: 0.8,
-          maxOutputTokens: 800,
-          topP: 0.95,
-        },
-      });
-      const response = result.response.text();
-      const lines = response.split("\n").filter((l: any) => l.trim());
-      return {
-        recommendation: lines[0] || response,
-        supportMessage: lines[1] || "Mọi cảm xúc đều tạm thời và sẽ qua đi.",
-        actionSuggestion: lines[2] || undefined,
-      };
-    });
+    recommendation = ensureComplete(recommendation);
+    supportMessage = ensureComplete(supportMessage);
+    actionSuggestion = ensureComplete(actionSuggestion);
 
-    this.setCache(cacheKey, result);
-    return result;
-  }
+    // ✅ USE FALLBACKS if any field is empty
+    if (!recommendation) {
+      recommendation = getFallbackRecommendation(dominantEmotion, language, "recommendation");
+      console.log("⚠️ Using fallback recommendation");
+    }
+    if (!supportMessage) {
+      supportMessage = getFallbackRecommendation(dominantEmotion, language, "support");
+      console.log("⚠️ Using fallback support");
+    }
+    if (!actionSuggestion) {
+      actionSuggestion = getFallbackRecommendation(dominantEmotion, language, "action");
+      console.log("⚠️ Using fallback action");
+    }
+
+    console.log("✅ Final parsed recommendations:");
+    console.log("  - Recommendation:", recommendation);
+    console.log("  - Support:", supportMessage);
+    console.log("  - Action:", actionSuggestion);
+
+    return {
+      recommendation,
+      supportMessage,
+      actionSuggestion,
+    };
+  });
+
+  this.setCache(cacheKey, result);
+  return result;
+}
 
   async generateSmartSuggestions(context: {
     recentTopics: string[];
@@ -438,11 +548,11 @@ ${
     if (cached) return cached;
 
     const prompts = {
-      vi: `Dựa trên:
-- Chủ đề gần đây: ${
+      vi: `Bạn là trợ lý AI tâm lý. Dựa trên:
+- Chủ đề người dùng đã hỏi gần đây: ${
         recentTopics.length > 0 ? recentTopics.join(", ") : "Chưa có lịch sử"
       }
-- Cảm xúc: ${
+- Cảm xúc hiện tại của người dùng: ${
         emotionContext
           ? `${emotionContext.dominantEmotion} (${(
               emotionContext.emotionIntensity * 100
@@ -450,12 +560,31 @@ ${
           : "Chưa phân tích"
       }
 
-Tạo ${limit} câu hỏi đề xuất sâu sắc, thấu hiểu, mỗi câu 1 dòng, KHÔNG đánh số:`,
-      en: `Based on:
-- Recent topics: ${
+Hãy tạo ${limit} câu hỏi mà NGƯỜI DÙNG có thể hỏi AI để:
+- Tiếp tục cuộc trò chuyện một cách tự nhiên
+- Khám phá sâu hơn về cảm xúc hoặc vấn đề của họ
+- Nhận được lời khuyên hoặc hỗ trợ phù hợp
+
+YÊU CẦU:
+- Mỗi câu hỏi là một câu hoàn chỉnh mà người dùng sẽ GỬI cho AI
+- KHÔNG đánh số, KHÔNG dùng dấu gạch đầu dòng
+- Mỗi câu một dòng
+- Câu hỏi phải tự nhiên, thân thiện như người dùng đang nhắn tin
+
+VÍ DỤ ĐÚNG:
+Làm sao để tôi cải thiện tâm trạng?
+Tôi nên làm gì khi cảm thấy căng thẳng?
+Bạn có thể giúp tôi hiểu rõ hơn về cảm xúc này không?
+
+VÍ DỤ SAI (KHÔNG làm như này):
+1. Bạn đang cảm thấy thế nào?
+- Có điều gì khiến bạn lo lắng không?`,
+
+      en: `You are a mental health AI assistant. Based on:
+- User's recent topics: ${
         recentTopics.length > 0 ? recentTopics.join(", ") : "No history"
       }
-- Emotion: ${
+- User's current emotion: ${
         emotionContext
           ? `${emotionContext.dominantEmotion} (${(
               emotionContext.emotionIntensity * 100
@@ -463,10 +592,31 @@ Tạo ${limit} câu hỏi đề xuất sâu sắc, thấu hiểu, mỗi câu 1 d
           : "Not analyzed"
       }
 
-Create ${limit} thoughtful, empathetic question suggestions, one per line, NO numbering:`,
-      zh: `基于：
-- 最近话题：${recentTopics.length > 0 ? recentTopics.join(", ") : "无历史"}
-- 情绪：${
+Create ${limit} questions that the USER can ask the AI to:
+- Continue the conversation naturally
+- Explore their emotions or issues more deeply
+- Get appropriate advice or support
+
+REQUIREMENTS:
+- Each question is a complete sentence the user will SEND to the AI
+- NO numbering, NO bullet points
+- One question per line
+- Questions should be natural and friendly like the user is texting
+
+CORRECT EXAMPLES:
+How can I improve my mood?
+What should I do when I feel stressed?
+Can you help me understand this emotion better?
+
+WRONG EXAMPLES (DON'T do this):
+1. How are you feeling?
+- Is something worrying you?`,
+
+      zh: `你是一个心理健康AI助手。基于：
+- 用户最近的话题：${
+        recentTopics.length > 0 ? recentTopics.join(", ") : "无历史"
+      }
+- 用户当前情绪：${
         emotionContext
           ? `${emotionContext.dominantEmotion} (${(
               emotionContext.emotionIntensity * 100
@@ -474,7 +624,25 @@ Create ${limit} thoughtful, empathetic question suggestions, one per line, NO nu
           : "未分析"
       }
 
-创建${limit}个深思熟虑、富有同理心的问题建议，每行一个，不编号：`,
+创建${limit}个用户可以问AI的问题，以便：
+- 自然地继续对话
+- 更深入地探索他们的情绪或问题
+- 获得适当的建议或支持
+
+要求：
+- 每个问题是用户将发送给AI的完整句子
+- 不编号，不使用项目符号
+- 每行一个问题
+- 问题应自然友好，像用户在发短信
+
+正确示例：
+我该如何改善心情？
+感到压力时应该做什么？
+你能帮我更好地理解这种情绪吗？
+
+错误示例（不要这样做）：
+1. 你感觉怎么样？
+- 有什么让你担心的吗？`,
     };
 
     const suggestions = await this.retryWithBackoff(async () => {
@@ -492,28 +660,32 @@ Create ${limit} thoughtful, empathetic question suggestions, one per line, NO nu
         .split("\n")
         .map((line: any) => line.trim())
         .filter((line: any) => line.length > 0)
-        .map((line: any) => line.replace(/^\d+[\.\)]\s*/, ""))
+        // ✅ Loại bỏ số thứ tự và dấu gạch đầu dòng
+        .map((line: any) =>
+          line.replace(/^\d+[\.\)]\s*/, "").replace(/^[-•]\s*/, "")
+        )
         .filter((line: any) => line.length > 10)
         .slice(0, limit);
 
+      // Fallback suggestions nếu AI không trả về đủ
       const fallbacks = {
         vi: [
-          "Bạn cảm thấy thế nào về ngày hôm nay?",
-          "Có điều gì đang khiến bạn lo lắng không?",
-          "Hãy kể về khoảnh khắc vui gần đây nhất của bạn",
-          "Bạn muốn chia sẻ điều gì với mình?",
+          "Làm sao để tôi cải thiện tâm trạng của mình?",
+          "Bạn có thể cho tôi lời khuyên về việc quản lý stress không?",
+          "Tôi nên làm gì khi cảm thấy lo lắng?",
+          "Có cách nào để tôi cảm thấy tích cực hơn không?",
         ],
         en: [
-          "How are you feeling today?",
-          "Is something worrying you?",
-          "Tell me about your most recent happy moment",
-          "What would you like to share with me?",
+          "How can I improve my mood?",
+          "Can you give me advice on managing stress?",
+          "What should I do when I feel anxious?",
+          "Is there a way for me to feel more positive?",
         ],
         zh: [
-          "你今天感觉怎么样？",
-          "有什么让你担心的吗？",
-          "告诉我你最近最快乐的时刻",
-          "你想和我分享什么？",
+          "我该如何改善心情？",
+          "你能给我管理压力的建议吗？",
+          "当我感到焦虑时应该做什么？",
+          "有什么方法可以让我更积极吗？",
         ],
       };
 
@@ -564,6 +736,100 @@ Create ${limit} thoughtful, empathetic question suggestions, one per line, NO nu
       return false;
     }
   }
+}
+
+// Helper function for fallback recommendations
+function getFallbackRecommendation(
+  emotion: string,
+  language: "vi" | "en" | "zh",
+  type: "recommendation" | "support" | "action"
+): string {
+  const fallbacks: Record<string, Record<string, Record<string, string>>> = {
+    vi: {
+      joy: {
+        recommendation: "Bạn đang trong trạng thái cảm xúc tích cực, đây là thời điểm tuyệt vời để kết nối với người thân.",
+        support: "Hãy tận hưởng những khoảnh khắc hạnh phúc này và ghi nhận những điều tốt đẹp trong cuộc sống.",
+        action: "Viết nhật ký biết ơn hoặc chia sẻ niềm vui với một người bạn thân.",
+      },
+      sadness: {
+        recommendation: "Cảm giác buồn là một phần tự nhiên của cuộc sống, hãy cho phép bản thân được cảm nhận và chữa lành.",
+        support: "Đôi khi, chỉ cần cho phép bản thân khóc và nghỉ ngơi cũng đã là một hành động dũng cảm.",
+        action: "Hãy nói chuyện với người thân hoặc tìm kiếm sự hỗ trợ chuyên nghiệp nếu cần.",
+      },
+      anger: {
+        recommendation: "Cảm giác tức giận cho thấy ranh giới của bạn đang bị xâm phạm, hãy xác định nguyên nhân.",
+        support: "Giận dữ là cảm xúc hợp lệ, nhưng cách bạn thể hiện nó mới quan trọng.",
+        action: "Thử vận động thể chất, viết ra cảm xúc hoặc thực hành thiền định.",
+      },
+      fear: {
+        recommendation: "Nỗi sợ hãi có thể là dấu hiệu bảo vệ, nhưng đừng để nó chi phối cuộc sống.",
+        support: "Bạn mạnh mẽ hơn những gì bạn nghĩ, mỗi bước nhỏ đều là tiến bộ.",
+        action: "Chia nhỏ những lo lắng thành các vấn đề cụ thể và giải quyết từng cái một.",
+      },
+      neutral: {
+        recommendation: "Trạng thái cân bằng cảm xúc là một điều tốt, đây là lúc thích hợp để lập kế hoạch.",
+        support: "Sự ổn định cảm xúc là nền tảng cho sức khỏe tinh thần tốt.",
+        action: "Duy trì thói quen tốt và đặt mục tiêu mới cho bản thân.",
+      },
+    },
+    en: {
+      joy: {
+        recommendation: "You're in a positive emotional state, this is a great time to connect with loved ones.",
+        support: "Enjoy these happy moments and acknowledge the good things in your life.",
+        action: "Write in a gratitude journal or share your joy with a friend.",
+      },
+      sadness: {
+        recommendation: "Feeling sad is a natural part of life, allow yourself to feel and heal.",
+        support: "Sometimes, just allowing yourself to cry and rest is already an act of courage.",
+        action: "Talk to loved ones or seek professional support if needed.",
+      },
+      anger: {
+        recommendation: "Anger shows your boundaries are being crossed, identify the cause.",
+        support: "Anger is a valid emotion, but how you express it matters.",
+        action: "Try physical exercise, write down your feelings, or practice meditation.",
+      },
+      fear: {
+        recommendation: "Fear can be protective, but don't let it control your life.",
+        support: "You're stronger than you think, every small step is progress.",
+        action: "Break down worries into specific issues and tackle them one by one.",
+      },
+      neutral: {
+        recommendation: "Emotional balance is a good thing, this is a great time to plan.",
+        support: "Emotional stability is the foundation for good mental health.",
+        action: "Maintain good habits and set new goals for yourself.",
+      },
+    },
+    zh: {
+      joy: {
+        recommendation: "您处于积极的情绪状态，这是与亲人联系的好时机。",
+        support: "享受这些快乐的时刻，并感恩生活中美好的事物。",
+        action: "写感恩日记或与朋友分享您的快乐。",
+      },
+      sadness: {
+        recommendation: "悲伤是生活的自然组成部分，允许自己感受和疗愈。",
+        support: "有时候，允许自己哭泣和休息本身就是一种勇敢的行为。",
+        action: "与亲人交谈或在需要时寻求专业支持。",
+      },
+      anger: {
+        recommendation: "愤怒表明您的界限被侵犯了，找出原因。",
+        support: "愤怒是有效的情绪，但表达方式很重要。",
+        action: "尝试体育锻炼、写下感受或练习冥想。",
+      },
+      fear: {
+        recommendation: "恐惧可以起保护作用，但不要让它控制您的生活。",
+        support: "您比自己想象的更强大，每一小步都是进步。",
+        action: "将担忧分解为具体问题，逐一解决。",
+      },
+      neutral: {
+        recommendation: "情绪平衡是好事，这是规划的好时机。",
+        support: "情绪稳定是良好心理健康的基础。",
+        action: "保持良好习惯，为自己设定新目标。",
+      },
+    },
+  };
+
+  const emotionKey = emotion in fallbacks[language] ? emotion : "neutral";
+  return fallbacks[language][emotionKey][type];
 }
 
 export const geminiService = new GeminiService();

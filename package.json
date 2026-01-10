@@ -22,6 +22,7 @@
     "canvas": "^3.2.0",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "expo-server-sdk": "^4.0.0",
     "express": "^5.1.0",
     "face-api.js": "^0.22.2",

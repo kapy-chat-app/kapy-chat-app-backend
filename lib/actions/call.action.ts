@@ -303,6 +303,64 @@ async function createCallLogMessage(params: {
   }
 }
 
+/**
+ * ⚡ Async notification sender (non-blocking)
+ */
+async function sendCallNotificationsAsync(params: {
+  otherParticipants: any[];
+  callData: any;
+}) {
+  const { otherParticipants, callData } = params;
+
+  try {
+    for (const participant of otherParticipants) {
+      if (!participant.clerkId) continue;
+
+      const participantUser = await User.findOne({
+        clerkId: participant.clerkId,
+      });
+
+      if (!participantUser) {
+        console.log(`⚠️ User not found: ${participant.clerkId}`);
+        continue;
+      }
+
+      const pushTokenDoc = await PushToken.findOne({
+        user: participantUser._id,
+        is_active: true,
+      }).sort({ last_used: -1 });
+
+      if (!pushTokenDoc?.token) {
+        console.log(`⚠️ No push token for user: ${participant.clerkId}`);
+        continue;
+      }
+
+      const token = pushTokenDoc.token;
+      let ticket;
+
+      if (isValidFCMToken(token)) {
+        console.log(`📱 Sending FCM notification to ${participant.clerkId}`);
+        ticket = await sendFCMCallNotification({
+          fcmToken: token,
+          ...callData,
+        });
+      } else {
+        console.log(`📱 Sending Expo notification to ${participant.clerkId}`);
+        ticket = await sendExpoCallNotification({
+          pushToken: token,
+          ...callData,
+        });
+      }
+
+      if (ticket?.status === "ok") {
+        console.log(`✅ Notification delivered to ${participant.clerkId}`);
+      }
+    }
+  } catch (error) {
+    console.error("⚠️ Notification batch error:", error);
+    // Don't throw - this runs async
+  }
+}
 
 /**
  * Initiate a new call - WITH FCM SUPPORT
@@ -431,8 +489,9 @@ export async function initiateCall(params: {
     }
 
     // ⭐ UPDATED: Send push notifications with FCM/Expo detection
-    try {
-      const notificationData = {
+    sendCallNotificationsAsync({
+      otherParticipants,
+      callData: {
         callerName: displayName,
         callType: type,
         callId: call._id.toString(),
@@ -444,66 +503,8 @@ export async function initiateCall(params: {
         conversationName: conversation.name || displayName,
         conversationAvatar: displayAvatar,
         participantsCount: call.participants.length - 1,
-      };
-
-      for (const participant of otherParticipants) {
-        if (!participant.clerkId) continue;
-
-        const participantUser = await User.findOne({
-          clerkId: participant.clerkId,
-        });
-
-        if (!participantUser) {
-          console.log(`⚠️ User not found: ${participant.clerkId}`);
-          continue;
-        }
-
-        const pushTokenDoc = await PushToken.findOne({
-          user: participantUser._id,
-          is_active: true,
-        }).sort({ last_used: -1 });
-
-        if (!pushTokenDoc?.token) {
-          console.log(`⚠️ No push token for user: ${participant.clerkId}`);
-          continue;
-        }
-
-        let ticket;
-        const token = pushTokenDoc.token;
-
-        // ⭐ Detect token type and send appropriate notification
-        if (isValidFCMToken(token)) {
-          // ✅ FCM Token - Use Firebase Admin SDK (full-screen on Android)
-          console.log(`📱 Sending FCM notification to ${participant.clerkId}`);
-          
-          ticket = await sendFCMCallNotification({
-            fcmToken: token,
-            ...notificationData,
-          });
-
-          console.log(`✅ FCM sent:`, ticket);
-        } else {
-          // ✅ Expo Token - Use Expo Push Service (iOS/Expo Go)
-          console.log(`📱 Sending Expo notification to ${participant.clerkId}`);
-          
-          ticket = await sendExpoCallNotification({
-            pushToken: token,
-            ...notificationData,
-          });
-
-          console.log(`✅ Expo sent:`, ticket);
-        }
-
-        if (ticket?.status === "ok") {
-          console.log(`✅ Call notification delivered to ${participant.clerkId}`);
-        } else {
-          console.error(`❌ Failed to send notification to ${participant.clerkId}:`, ticket);
-        }
-      }
-    } catch (notifError) {
-      console.error("⚠️ Failed to send call notifications:", notifError);
-      // Don't throw - call should still work via socket
-    }
+      },
+    }).catch(err => console.error("⚠️ Async notification error:", err));
 
     return {
       success: true,

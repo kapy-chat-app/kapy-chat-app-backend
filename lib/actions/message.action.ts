@@ -13,8 +13,21 @@ import File from "@/database/file.model";
 import { isUserActiveInConversation } from "../socket/activeUsers";
 import { checkUserActiveInConversation } from "../socket.helper";
 import { emitSocketEvent } from "../socket.helper";
+
 // ============================================
-// CREATE MESSAGE WITH RICH MEDIA - UPDATED
+// HELPER FUNCTION - Extract Avatar URL
+// ============================================
+const extractAvatarUrl = (avatar: any): string | undefined => {
+  if (!avatar) return undefined;
+  if (typeof avatar === 'string') return avatar;
+  if (typeof avatar === 'object' && avatar !== null) {
+    return avatar.url || avatar.uri || undefined;
+  }
+  return undefined;
+};
+
+// ============================================
+// CREATE MESSAGE WITH RICH MEDIA - UPDATED WITH AVATAR FIX
 // ============================================
 export async function createMessage(data: CreateMessageDTO) {
   try {
@@ -99,11 +112,6 @@ export async function createMessage(data: CreateMessageDTO) {
     }
 
     const message = await Message.create(messageData);
-
-    // ==========================================
-    // ❌ REMOVED: AI EMOTION ANALYSIS
-    // ==========================================
-    // Emotion analysis sẽ được xử lý ở client-side
 
     // Update conversation
     const updateConversationPromise = Conversation.findByIdAndUpdate(
@@ -355,6 +363,32 @@ export async function createMessage(data: CreateMessageDTO) {
       );
     }
 
+    // ✅ CRITICAL FIX: Extract avatar URL from sender
+    if (messageObj.sender && messageObj.sender.avatar) {
+      const originalAvatar = messageObj.sender.avatar;
+      messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
+      
+      console.log("🔍 [CREATE] Sender avatar extraction:", {
+        original: originalAvatar,
+        originalType: typeof originalAvatar,
+        extracted: messageObj.sender.avatar,
+        extractedType: typeof messageObj.sender.avatar,
+      });
+    }
+
+    // ✅ CRITICAL FIX: Extract avatar URL from reply_to sender if exists
+    if (messageObj.reply_to?.sender?.avatar) {
+      const originalReplyAvatar = messageObj.reply_to.sender.avatar;
+      messageObj.reply_to.sender.avatar = extractAvatarUrl(messageObj.reply_to.sender.avatar);
+      
+      console.log("🔍 [CREATE] Reply_to sender avatar extraction:", {
+        original: originalReplyAvatar,
+        originalType: typeof originalReplyAvatar,
+        extracted: messageObj.reply_to.sender.avatar,
+        extractedType: typeof messageObj.reply_to.sender.avatar,
+      });
+    }
+
     // Emit socket event
     await emitSocketEvent(
       "newMessage",
@@ -365,7 +399,7 @@ export async function createMessage(data: CreateMessageDTO) {
         sender_id: user.clerkId,
         sender_name: user.full_name,
         sender_username: user.username,
-        sender_avatar: messageObj.sender?.avatar,
+        sender_avatar: messageObj.sender?.avatar, // ✅ Now it's a string
         message_content: undefined,
         encrypted_content: encryptedContent,
         encryption_metadata: encryptionMetadata,
@@ -900,7 +934,7 @@ export async function getRichMediaStats(
 }
 
 // ============================================
-// UPDATE MESSAGE
+// UPDATE MESSAGE - WITH AVATAR FIX
 // ============================================
 export async function updateMessage(
   messageId: string,
@@ -1095,6 +1129,17 @@ export async function updateMessage(
       }));
     }
 
+    // ✅ CRITICAL FIX: Extract avatar URL
+    if (messageObj.sender && messageObj.sender.avatar) {
+      const originalAvatar = messageObj.sender.avatar;
+      messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
+      
+      console.log("🔍 [UPDATE] Sender avatar extraction:", {
+        original: originalAvatar,
+        extracted: messageObj.sender.avatar,
+      });
+    }
+
     // ✅ Emit socket event với FULL message data
     await emitSocketEvent(
       "updateMessage",
@@ -1191,7 +1236,9 @@ export async function deleteMessage(
     };
   }
 }
-// ✅ NEW: RECALL MESSAGE (thu hồi tin nhắn)
+// ============================================
+// RECALL MESSAGE - WITH AVATAR FIX
+// ============================================
 export async function recallMessage(messageId: string) {
   try {
     await connectToDatabase();
@@ -1270,6 +1317,17 @@ export async function recallMessage(messageId: string) {
     ]);
 
     const messageObj = updatedMessage[0];
+
+    // ✅ CRITICAL FIX: Extract avatar URL
+    if (messageObj.sender && messageObj.sender.avatar) {
+      const originalAvatar = messageObj.sender.avatar;
+      messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
+      
+      console.log("🔍 [RECALL] Sender avatar extraction:", {
+        original: originalAvatar,
+        extracted: messageObj.sender.avatar,
+      });
+    }
 
     // ✅ Emit socket event - RECALL MESSAGE
     await emitSocketEvent(
