@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node socket-server.js",
-    "dev:next": "next dev",
+    "dev": "concurrently \"npm:dev:next\" \"npm:dev:socket\"",
+    "dev:next": "next dev -p 3000",
     "dev:socket": "node socket-server.js",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3000",
+    "start:socket": "node socket-server.js",
+    "start:all": "concurrently \"npm:start\" \"npm:start:socket\"",
     "lint": "eslint"
   },
   "dependencies": {
