@@ -3,10 +3,10 @@ import { removeParticipant } from '@/lib/actions/conversation.action';
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await context.params;
     const { searchParams } = new URL(req.url);
     const participantId = searchParams.get('participantId');
 

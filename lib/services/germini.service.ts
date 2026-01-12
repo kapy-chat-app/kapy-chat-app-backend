@@ -356,34 +356,37 @@ ${
   }
 
   async analyzeAndRecommend(
-  emotionContext: any,
-  language: "vi" | "en" | "zh" = "vi"
-): Promise<{
-  recommendation: string;
-  supportMessage: string;
-  actionSuggestion?: string;
-}> {
-  const cacheKey = `recommend_${
-    emotionContext.dominantEmotion
-  }_${language}_${Math.floor(emotionContext.emotionIntensity * 10)}`;
-  
-  const cached = this.getCached<{
+    emotionContext: any,
+    language: "vi" | "en" | "zh" = "vi"
+  ): Promise<{
     recommendation: string;
     supportMessage: string;
     actionSuggestion?: string;
-  }>(cacheKey);
-  if (cached) return cached;
+  }> {
+    const cacheKey = `recommend_${
+      emotionContext.dominantEmotion
+    }_${language}_${Math.floor(emotionContext.emotionIntensity * 10)}`;
 
-  const { recentEmotions, dominantEmotion, emotionIntensity, negativeRatio } = emotionContext;
-  
-  const emotionTimeline = recentEmotions
-    .slice(0, 5)
-    .map((e: any) => `${e.emotion} (${(e.confidence * 100).toFixed(0)}%)`)
-    .join(" → ");
+    const cached = this.getCached<{
+      recommendation: string;
+      supportMessage: string;
+      actionSuggestion?: string;
+    }>(cacheKey);
+    if (cached) return cached;
 
-  // ✅ SIMPLIFIED PROMPT - Shorter and clearer
-  const prompts: Record<string, string> = {
-    vi: `Phân tích cảm xúc: ${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+    const { recentEmotions, dominantEmotion, emotionIntensity, negativeRatio } =
+      emotionContext;
+
+    const emotionTimeline = recentEmotions
+      .slice(0, 5)
+      .map((e: any) => `${e.emotion} (${(e.confidence * 100).toFixed(0)}%)`)
+      .join(" → ");
+
+    // ✅ SIMPLIFIED PROMPT - Shorter and clearer
+    const prompts: Record<string, string> = {
+      vi: `Phân tích cảm xúc: ${dominantEmotion} (${(
+        emotionIntensity * 100
+      ).toFixed(0)}%)
 
 Viết 3 câu ngắn (mỗi câu 15-20 từ):
 
@@ -393,7 +396,9 @@ Viết 3 câu ngắn (mỗi câu 15-20 từ):
 
 Chỉ viết 3 câu, mỗi dòng một câu, kết thúc bằng dấu chấm.`,
 
-    en: `Emotion analysis: ${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+      en: `Emotion analysis: ${dominantEmotion} (${(
+        emotionIntensity * 100
+      ).toFixed(0)}%)
 
 Write 3 short sentences (15-20 words each):
 
@@ -403,7 +408,9 @@ Write 3 short sentences (15-20 words each):
 
 Only 3 sentences, one per line, end with period.`,
 
-    zh: `情绪分析：${dominantEmotion} (${(emotionIntensity * 100).toFixed(0)}%)
+      zh: `情绪分析：${dominantEmotion} (${(emotionIntensity * 100).toFixed(
+        0
+      )}%)
 
 写3个简短句子（每句15-20字）：
 
@@ -412,121 +419,137 @@ Only 3 sentences, one per line, end with period.`,
 3. 行动：[具体的行动建议]
 
 只写3句话，每行一句，以句号结束。`,
-  };
+    };
 
-  const result = await this.retryWithBackoff(async () => {
-    console.log("🤖 Calling Gemini for emotion recommendations...");
-    
-    const result = await this.model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompts[language] }] }],
-      generationConfig: {
-        temperature: 0.6, // ✅ Lower for consistency
-        maxOutputTokens: 512, // ✅ Sufficient for 3 short sentences
-        topP: 0.85,
-        topK: 40,
-        stopSequences: [], // ✅ No early stopping
-      },
-      // ✅ ADD SAFETY SETTINGS to prevent blocking
-      safetySettings: [
-        {
-          category: "HARM_CATEGORY_HARASSMENT",
-          threshold: "BLOCK_NONE",
+    const result = await this.retryWithBackoff(async () => {
+      console.log("🤖 Calling Gemini for emotion recommendations...");
+
+      const result = await this.model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompts[language] }] }],
+        generationConfig: {
+          temperature: 0.6, // ✅ Lower for consistency
+          maxOutputTokens: 512, // ✅ Sufficient for 3 short sentences
+          topP: 0.85,
+          topK: 40,
+          stopSequences: [], // ✅ No early stopping
         },
-        {
-          category: "HARM_CATEGORY_HATE_SPEECH",
-          threshold: "BLOCK_NONE",
-        },
-        {
-          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-          threshold: "BLOCK_NONE",
-        },
-        {
-          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-          threshold: "BLOCK_NONE",
-        },
-      ],
-    });
-    
-    let response = result.response.text().trim();
-    console.log("🤖 Gemini raw response:", response);
-    console.log("🤖 Response length:", response.length);
+        // ✅ ADD SAFETY SETTINGS to prevent blocking
+        safetySettings: [
+          {
+            category: "HARM_CATEGORY_HARASSMENT",
+            threshold: "BLOCK_NONE",
+          },
+          {
+            category: "HARM_CATEGORY_HATE_SPEECH",
+            threshold: "BLOCK_NONE",
+          },
+          {
+            category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            threshold: "BLOCK_NONE",
+          },
+          {
+            category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+            threshold: "BLOCK_NONE",
+          },
+        ],
+      });
 
-    // ✅ SIMPLE LINE-BASED PARSING
-    const lines = response
-      .split("\n")
-      .map((l) => l.trim())
-      // Remove numbering and labels
-      .map((l) => 
-        l.replace(/^\d+\.\s*/, "")
-         .replace(/^(PHÂN TÍCH|ĐỘNG VIÊN|HÀNH ĐỘNG|ANALYSIS|ENCOURAGEMENT|ACTION|分析|鼓励|行动)[:：]\s*/i, "")
-         .replace(/^\[.*?\]\s*/, "")
-      )
-      .filter((l) => l.length > 10);
+      const response = result.response.text().trim();
+      console.log("🤖 Gemini raw response:", response);
+      console.log("🤖 Response length:", response.length);
 
-    console.log("🤖 Parsed lines:", lines);
+      // ✅ SIMPLE LINE-BASED PARSING
+      const lines = response
+        .split("\n")
+        .map((l:string) => l.trim())
+        // Remove numbering and labels
+        .map((l:string) =>
+          l
+            .replace(/^\d+\.\s*/, "")
+            .replace(
+              /^(PHÂN TÍCH|ĐỘNG VIÊN|HÀNH ĐỘNG|ANALYSIS|ENCOURAGEMENT|ACTION|分析|鼓励|行动)[:：]\s*/i,
+              ""
+            )
+            .replace(/^\[.*?\]\s*/, "")
+        )
+        .filter((l:string) => l.length > 10);
 
-    let recommendation = lines[0] || "";
-    let supportMessage = lines[1] || "";
-    let actionSuggestion = lines[2] || "";
+      console.log("🤖 Parsed lines:", lines);
 
-    // ✅ ENSURE COMPLETE SENTENCES
-    const ensureComplete = (text: string): string => {
-      if (!text) return text;
-      text = text.trim();
-      
-      // If incomplete (doesn't end with punctuation), try to salvage
-      if (!/[.!?។]$/.test(text)) {
-        const lastPunct = Math.max(
-          text.lastIndexOf("."),
-          text.lastIndexOf("!"),
-          text.lastIndexOf("?")
-        );
-        
-        if (lastPunct > 15) {
-          text = text.substring(0, lastPunct + 1);
-        } else if (text.length > 15) {
-          text += ".";
-        } else {
-          return ""; // Too short, will use fallback
+      let recommendation = lines[0] || "";
+      let supportMessage = lines[1] || "";
+      let actionSuggestion = lines[2] || "";
+
+      // ✅ ENSURE COMPLETE SENTENCES
+      const ensureComplete = (text: string): string => {
+        if (!text) return text;
+        text = text.trim();
+
+        // If incomplete (doesn't end with punctuation), try to salvage
+        if (!/[.!?។]$/.test(text)) {
+          const lastPunct = Math.max(
+            text.lastIndexOf("."),
+            text.lastIndexOf("!"),
+            text.lastIndexOf("?")
+          );
+
+          if (lastPunct > 15) {
+            text = text.substring(0, lastPunct + 1);
+          } else if (text.length > 15) {
+            text += ".";
+          } else {
+            return ""; // Too short, will use fallback
+          }
         }
+
+        return text;
+      };
+
+      recommendation = ensureComplete(recommendation);
+      supportMessage = ensureComplete(supportMessage);
+      actionSuggestion = ensureComplete(actionSuggestion);
+
+      // ✅ USE FALLBACKS if any field is empty
+      if (!recommendation) {
+        recommendation = getFallbackRecommendation(
+          dominantEmotion,
+          language,
+          "recommendation"
+        );
+        console.log("⚠️ Using fallback recommendation");
       }
-      
-      return text;
-    };
+      if (!supportMessage) {
+        supportMessage = getFallbackRecommendation(
+          dominantEmotion,
+          language,
+          "support"
+        );
+        console.log("⚠️ Using fallback support");
+      }
+      if (!actionSuggestion) {
+        actionSuggestion = getFallbackRecommendation(
+          dominantEmotion,
+          language,
+          "action"
+        );
+        console.log("⚠️ Using fallback action");
+      }
 
-    recommendation = ensureComplete(recommendation);
-    supportMessage = ensureComplete(supportMessage);
-    actionSuggestion = ensureComplete(actionSuggestion);
+      console.log("✅ Final parsed recommendations:");
+      console.log("  - Recommendation:", recommendation);
+      console.log("  - Support:", supportMessage);
+      console.log("  - Action:", actionSuggestion);
 
-    // ✅ USE FALLBACKS if any field is empty
-    if (!recommendation) {
-      recommendation = getFallbackRecommendation(dominantEmotion, language, "recommendation");
-      console.log("⚠️ Using fallback recommendation");
-    }
-    if (!supportMessage) {
-      supportMessage = getFallbackRecommendation(dominantEmotion, language, "support");
-      console.log("⚠️ Using fallback support");
-    }
-    if (!actionSuggestion) {
-      actionSuggestion = getFallbackRecommendation(dominantEmotion, language, "action");
-      console.log("⚠️ Using fallback action");
-    }
+      return {
+        recommendation,
+        supportMessage,
+        actionSuggestion,
+      };
+    });
 
-    console.log("✅ Final parsed recommendations:");
-    console.log("  - Recommendation:", recommendation);
-    console.log("  - Support:", supportMessage);
-    console.log("  - Action:", actionSuggestion);
-
-    return {
-      recommendation,
-      supportMessage,
-      actionSuggestion,
-    };
-  });
-
-  this.setCache(cacheKey, result);
-  return result;
-}
+    this.setCache(cacheKey, result);
+    return result;
+  }
 
   async generateSmartSuggestions(context: {
     recentTopics: string[];
@@ -736,6 +759,34 @@ WRONG EXAMPLES (DON'T do this):
       return false;
     }
   }
+
+  /**
+   * ⭐ Generate simple text from prompt
+   */
+  public async generateText(
+    prompt: string,
+    config?: {
+      temperature?: number;
+      topP?: number;
+      maxOutputTokens?: number;
+    }
+  ): Promise<string> {
+    const result = await this.retryWithBackoff(async () => {
+      const response = await this.model.generateContent({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: config,
+      });
+
+      return response.response.text().trim();
+    });
+
+    return result;
+  }
 }
 
 // Helper function for fallback recommendations
@@ -747,55 +798,79 @@ function getFallbackRecommendation(
   const fallbacks: Record<string, Record<string, Record<string, string>>> = {
     vi: {
       joy: {
-        recommendation: "Bạn đang trong trạng thái cảm xúc tích cực, đây là thời điểm tuyệt vời để kết nối với người thân.",
-        support: "Hãy tận hưởng những khoảnh khắc hạnh phúc này và ghi nhận những điều tốt đẹp trong cuộc sống.",
-        action: "Viết nhật ký biết ơn hoặc chia sẻ niềm vui với một người bạn thân.",
+        recommendation:
+          "Bạn đang trong trạng thái cảm xúc tích cực, đây là thời điểm tuyệt vời để kết nối với người thân.",
+        support:
+          "Hãy tận hưởng những khoảnh khắc hạnh phúc này và ghi nhận những điều tốt đẹp trong cuộc sống.",
+        action:
+          "Viết nhật ký biết ơn hoặc chia sẻ niềm vui với một người bạn thân.",
       },
       sadness: {
-        recommendation: "Cảm giác buồn là một phần tự nhiên của cuộc sống, hãy cho phép bản thân được cảm nhận và chữa lành.",
-        support: "Đôi khi, chỉ cần cho phép bản thân khóc và nghỉ ngơi cũng đã là một hành động dũng cảm.",
-        action: "Hãy nói chuyện với người thân hoặc tìm kiếm sự hỗ trợ chuyên nghiệp nếu cần.",
+        recommendation:
+          "Cảm giác buồn là một phần tự nhiên của cuộc sống, hãy cho phép bản thân được cảm nhận và chữa lành.",
+        support:
+          "Đôi khi, chỉ cần cho phép bản thân khóc và nghỉ ngơi cũng đã là một hành động dũng cảm.",
+        action:
+          "Hãy nói chuyện với người thân hoặc tìm kiếm sự hỗ trợ chuyên nghiệp nếu cần.",
       },
       anger: {
-        recommendation: "Cảm giác tức giận cho thấy ranh giới của bạn đang bị xâm phạm, hãy xác định nguyên nhân.",
-        support: "Giận dữ là cảm xúc hợp lệ, nhưng cách bạn thể hiện nó mới quan trọng.",
-        action: "Thử vận động thể chất, viết ra cảm xúc hoặc thực hành thiền định.",
+        recommendation:
+          "Cảm giác tức giận cho thấy ranh giới của bạn đang bị xâm phạm, hãy xác định nguyên nhân.",
+        support:
+          "Giận dữ là cảm xúc hợp lệ, nhưng cách bạn thể hiện nó mới quan trọng.",
+        action:
+          "Thử vận động thể chất, viết ra cảm xúc hoặc thực hành thiền định.",
       },
       fear: {
-        recommendation: "Nỗi sợ hãi có thể là dấu hiệu bảo vệ, nhưng đừng để nó chi phối cuộc sống.",
-        support: "Bạn mạnh mẽ hơn những gì bạn nghĩ, mỗi bước nhỏ đều là tiến bộ.",
-        action: "Chia nhỏ những lo lắng thành các vấn đề cụ thể và giải quyết từng cái một.",
+        recommendation:
+          "Nỗi sợ hãi có thể là dấu hiệu bảo vệ, nhưng đừng để nó chi phối cuộc sống.",
+        support:
+          "Bạn mạnh mẽ hơn những gì bạn nghĩ, mỗi bước nhỏ đều là tiến bộ.",
+        action:
+          "Chia nhỏ những lo lắng thành các vấn đề cụ thể và giải quyết từng cái một.",
       },
       neutral: {
-        recommendation: "Trạng thái cân bằng cảm xúc là một điều tốt, đây là lúc thích hợp để lập kế hoạch.",
+        recommendation:
+          "Trạng thái cân bằng cảm xúc là một điều tốt, đây là lúc thích hợp để lập kế hoạch.",
         support: "Sự ổn định cảm xúc là nền tảng cho sức khỏe tinh thần tốt.",
         action: "Duy trì thói quen tốt và đặt mục tiêu mới cho bản thân.",
       },
     },
     en: {
       joy: {
-        recommendation: "You're in a positive emotional state, this is a great time to connect with loved ones.",
-        support: "Enjoy these happy moments and acknowledge the good things in your life.",
+        recommendation:
+          "You're in a positive emotional state, this is a great time to connect with loved ones.",
+        support:
+          "Enjoy these happy moments and acknowledge the good things in your life.",
         action: "Write in a gratitude journal or share your joy with a friend.",
       },
       sadness: {
-        recommendation: "Feeling sad is a natural part of life, allow yourself to feel and heal.",
-        support: "Sometimes, just allowing yourself to cry and rest is already an act of courage.",
+        recommendation:
+          "Feeling sad is a natural part of life, allow yourself to feel and heal.",
+        support:
+          "Sometimes, just allowing yourself to cry and rest is already an act of courage.",
         action: "Talk to loved ones or seek professional support if needed.",
       },
       anger: {
-        recommendation: "Anger shows your boundaries are being crossed, identify the cause.",
+        recommendation:
+          "Anger shows your boundaries are being crossed, identify the cause.",
         support: "Anger is a valid emotion, but how you express it matters.",
-        action: "Try physical exercise, write down your feelings, or practice meditation.",
+        action:
+          "Try physical exercise, write down your feelings, or practice meditation.",
       },
       fear: {
-        recommendation: "Fear can be protective, but don't let it control your life.",
-        support: "You're stronger than you think, every small step is progress.",
-        action: "Break down worries into specific issues and tackle them one by one.",
+        recommendation:
+          "Fear can be protective, but don't let it control your life.",
+        support:
+          "You're stronger than you think, every small step is progress.",
+        action:
+          "Break down worries into specific issues and tackle them one by one.",
       },
       neutral: {
-        recommendation: "Emotional balance is a good thing, this is a great time to plan.",
-        support: "Emotional stability is the foundation for good mental health.",
+        recommendation:
+          "Emotional balance is a good thing, this is a great time to plan.",
+        support:
+          "Emotional stability is the foundation for good mental health.",
         action: "Maintain good habits and set new goals for yourself.",
       },
     },

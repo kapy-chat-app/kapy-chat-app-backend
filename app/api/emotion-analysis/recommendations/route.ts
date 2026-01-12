@@ -339,7 +339,7 @@ function getFallbackRecommendations(
   };
 
   const emotionKey = emotion in recommendations[language] ? emotion : "neutral";
-  let recs = [...recommendations[language][emotionKey]];
+  const recs = [...recommendations[language][emotionKey]];
 
   // Add warning for high negative ratio
   if (negativeRatio > 0.6) {

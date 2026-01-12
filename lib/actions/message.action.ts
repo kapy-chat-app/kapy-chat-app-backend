@@ -9,8 +9,6 @@ import Conversation from "@/database/conversation.model";
 import Message from "@/database/message.model";
 import PushToken from "@/database/push-token.model";
 import { sendPushNotification } from "../pushNotification";
-import File from "@/database/file.model";
-import { isUserActiveInConversation } from "../socket/activeUsers";
 import { checkUserActiveInConversation } from "../socket.helper";
 import { emitSocketEvent } from "../socket.helper";
 
@@ -19,8 +17,8 @@ import { emitSocketEvent } from "../socket.helper";
 // ============================================
 const extractAvatarUrl = (avatar: any): string | undefined => {
   if (!avatar) return undefined;
-  if (typeof avatar === 'string') return avatar;
-  if (typeof avatar === 'object' && avatar !== null) {
+  if (typeof avatar === "string") return avatar;
+  if (typeof avatar === "object" && avatar !== null) {
     return avatar.url || avatar.uri || undefined;
   }
   return undefined;
@@ -55,7 +53,7 @@ export async function createMessage(data: CreateMessageDTO) {
 
     if (!conversation) throw new Error("Conversation not found");
 
-    const isParticipant = conversation.participants.some(
+    const isParticipant = (conversation as any).participants.some(
       (p: any) => p.toString() === user._id.toString()
     );
     if (!isParticipant) throw new Error("Not a participant");
@@ -79,7 +77,7 @@ export async function createMessage(data: CreateMessageDTO) {
       type !== "text" &&
       type !== "gif" &&
       type !== "sticker" &&
-      type !== "call_log"
+      type !== ("call_log" as any)
     ) {
       if (
         (!attachments || attachments.length === 0) &&
@@ -367,7 +365,7 @@ export async function createMessage(data: CreateMessageDTO) {
     if (messageObj.sender && messageObj.sender.avatar) {
       const originalAvatar = messageObj.sender.avatar;
       messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
-      
+
       console.log("🔍 [CREATE] Sender avatar extraction:", {
         original: originalAvatar,
         originalType: typeof originalAvatar,
@@ -379,8 +377,10 @@ export async function createMessage(data: CreateMessageDTO) {
     // ✅ CRITICAL FIX: Extract avatar URL from reply_to sender if exists
     if (messageObj.reply_to?.sender?.avatar) {
       const originalReplyAvatar = messageObj.reply_to.sender.avatar;
-      messageObj.reply_to.sender.avatar = extractAvatarUrl(messageObj.reply_to.sender.avatar);
-      
+      messageObj.reply_to.sender.avatar = extractAvatarUrl(
+        messageObj.reply_to.sender.avatar
+      );
+
       console.log("🔍 [CREATE] Reply_to sender avatar extraction:", {
         original: originalReplyAvatar,
         originalType: typeof originalReplyAvatar,
@@ -423,7 +423,7 @@ export async function createMessage(data: CreateMessageDTO) {
         .lean();
 
       if (conversation) {
-        const recipients = conversation.participants.filter(
+        const recipients = (conversation as any).participants.filter(
           (p: any) => p.clerkId !== userId
         );
 
@@ -468,7 +468,7 @@ export async function createMessage(data: CreateMessageDTO) {
             senderName: user.full_name,
             senderAvatar: messageObj.sender?.avatar,
             messageType: type,
-            conversationType: conversation.type,
+            conversationType: (conversation as any).type,
             hasAttachments: allAttachmentIds.length > 0,
           };
 
@@ -495,8 +495,8 @@ export async function createMessage(data: CreateMessageDTO) {
           await sendPushNotification({
             pushToken: pushTokenDoc.token,
             title:
-              conversation.type === "group"
-                ? `${conversation.name || "Group Chat"}`
+              (conversation as any).type === "group" // ✅ FIX
+                ? `${(conversation as any).name || "Group Chat"}` // ✅ FIX
                 : user.full_name,
             body: messagePreview,
             data: notificationData,
@@ -1133,7 +1133,7 @@ export async function updateMessage(
     if (messageObj.sender && messageObj.sender.avatar) {
       const originalAvatar = messageObj.sender.avatar;
       messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
-      
+
       console.log("🔍 [UPDATE] Sender avatar extraction:", {
         original: originalAvatar,
         extracted: messageObj.sender.avatar,
@@ -1322,7 +1322,7 @@ export async function recallMessage(messageId: string) {
     if (messageObj.sender && messageObj.sender.avatar) {
       const originalAvatar = messageObj.sender.avatar;
       messageObj.sender.avatar = extractAvatarUrl(messageObj.sender.avatar);
-      
+
       console.log("🔍 [RECALL] Sender avatar extraction:", {
         original: originalAvatar,
         extracted: messageObj.sender.avatar,
@@ -1351,8 +1351,8 @@ export async function recallMessage(messageId: string) {
 
     return {
       success: true,
-      data: { 
-        messageId, 
+      data: {
+        messageId,
         recalledBy: user.full_name,
         recalledAt: new Date(),
       },
@@ -1391,7 +1391,7 @@ export async function addReaction(
 
     if (!conversation) throw new Error("Conversation not found");
 
-    const isParticipant = conversation.participants.some(
+    const isParticipant = (conversation as any).participants.some(
       (p: any) => p.toString() === user._id.toString()
     );
     if (!isParticipant) throw new Error("Not a participant");
@@ -1452,8 +1452,10 @@ export async function addReaction(
     }));
 
     // ✅ CRITICAL FIX: Emit socket event
-    console.log(`🎭 [REACTION] Emitting newReaction event for message ${messageId}`);
-    
+    console.log(
+      `🎭 [REACTION] Emitting newReaction event for message ${messageId}`
+    );
+
     await emitSocketEvent(
       "newReaction",
       message.conversation.toString(),
@@ -1509,7 +1511,7 @@ export async function removeReaction(messageId: string) {
 
     if (!conversation) throw new Error("Conversation not found");
 
-    const isParticipant = conversation.participants.some(
+    const isParticipant = (conversation as any).participants.some(
       (p: any) => p.toString() === user._id.toString()
     );
     if (!isParticipant) throw new Error("Not a participant");
@@ -1548,8 +1550,10 @@ export async function removeReaction(messageId: string) {
     }));
 
     // ✅ CRITICAL FIX: Emit socket event
-    console.log(`🎭 [REACTION] Emitting deleteReaction event for message ${messageId}`);
-    
+    console.log(
+      `🎭 [REACTION] Emitting deleteReaction event for message ${messageId}`
+    );
+
     await emitSocketEvent(
       "deleteReaction",
       message.conversation.toString(),
@@ -1696,8 +1700,10 @@ export async function toggleReaction(
         r.user.toString() === user._id.toString() && r.type === reactionType
     );
 
-    console.log(`🎭 [TOGGLE] Message ${messageId}, User ${userId}, Reaction ${reactionType}`);
-    console.log(`   Existing reaction: ${existingReaction ? 'YES' : 'NO'}`);
+    console.log(
+      `🎭 [TOGGLE] Message ${messageId}, User ${userId}, Reaction ${reactionType}`
+    );
+    console.log(`   Existing reaction: ${existingReaction ? "YES" : "NO"}`);
 
     if (existingReaction) {
       // Remove reaction if it exists

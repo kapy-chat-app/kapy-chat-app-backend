@@ -2,7 +2,7 @@
 "use client";
 
 // app/admin/users/page.tsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   UserListResponse,
@@ -14,7 +14,8 @@ import UserListTable from "@/components/page/user/UserListTable";
 import UserSearchBar from "@/components/page/user/UserSearchBar";
 import { Loader2 } from "lucide-react";
 
-const UserManagementPage = () => {
+// ✅ Tách component có useSearchParams ra riêng
+function UserManagementContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -256,6 +257,33 @@ const UserManagementPage = () => {
       </div>
     </div>
   );
-};
+}
 
-export default UserManagementPage;
+// ✅ Loading fallback component
+function UserManagementLoading() {
+  return (
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-7xl mx-auto">
+        <div className="mb-8">
+          <div className="h-10 w-64 bg-gray-200 rounded animate-pulse mb-2" />
+          <div className="h-6 w-96 bg-gray-200 rounded animate-pulse" />
+        </div>
+        <div className="bg-white rounded-lg shadow-sm p-12">
+          <div className="flex items-center justify-center">
+            <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <span className="ml-2 text-gray-600">Loading user management...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ✅ Main export - wrapped in Suspense
+export default function UserManagementPage() {
+  return (
+    <Suspense fallback={<UserManagementLoading />}>
+      <UserManagementContent />
+    </Suspense>
+  );
+}

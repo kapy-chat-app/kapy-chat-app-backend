@@ -1,11 +1,13 @@
 // src/app/api/ai/chat/conversations/[id]/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { deleteAIChatConversation } from "@/lib/actions/ai-chat.action";
+
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
-  const result = await deleteAIChatConversation(params.id);
+  const { id } = await context.params;
+  const result = await deleteAIChatConversation(id);
   
   if (!result.success) {
     return NextResponse.json(result, { status: 400 });

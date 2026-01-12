@@ -118,21 +118,12 @@ ${transcription ? `- 刚才说的："${transcription}"` : ""}
   try {
     const prompt = prompts[language];
 
-    const result = await geminiService.model.generateContent({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.9,
-        maxOutputTokens: 150,
-      },
+    // ✅ FIX: Use public method instead of accessing private model
+    const advice = await geminiService.generateText(prompt, {
+      temperature: 0.7,
+      topP: 0.9,
+      maxOutputTokens: 150,
     });
-
-    const advice = result.response.text().trim();
 
     console.log(`🤖 [Gemini] Generated advice for ${currentEmotion}:`, advice);
 

@@ -5,20 +5,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/mongoose";
 import User from "@/database/user.model";
 import { v4 as uuidv4 } from "uuid";
-import { uploadSessionStore } from "@/lib/uploadSessionStore"; // ✅ IMPORT SINGLETON
+import { uploadSessionStore, UploadSession } from "@/lib/uploadSessionStore";
 
 export const maxDuration = 300;
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> }
 ) {
   const startTime = Date.now();
 
   try {
     console.log("🚀 [Init Chunked Upload] Starting...");
 
-    const { id: conversationId } = await params;
+    const { id: conversationId } = await context.params;
     console.log("📍 Conversation ID:", conversationId);
 
     const { userId: clerkUserId } = await auth();
@@ -37,14 +37,13 @@ export async function POST(
     }
 
     const body = await req.json();
-    const { fileName, totalSize, totalChunks, metadata } = body;
+    const { fileName, totalSize, totalChunks, fileType, thumbnailUrl } = body;
 
     // ✅ Validation
-    if (!fileName || !totalSize || !totalChunks || !metadata) {
+    if (!fileName || !totalSize || !totalChunks) {
       return NextResponse.json(
         {
-          error:
-            "Missing required fields: fileName, totalSize, totalChunks, metadata",
+          error: "Missing required fields: fileName, totalSize, totalChunks",
         },
         { status: 400 }
       );
@@ -71,22 +70,24 @@ export async function POST(
     // ✅ Generate unique upload ID
     const uploadId = uuidv4();
 
-    // ✅ Store upload session in SINGLETON
-    const session = {
+    // ✅ Create session object matching UploadSession interface
+    const session: UploadSession = {
       uploadId,
       conversationId,
       userId: user._id.toString(),
       clerkUserId,
       fileName,
-      totalSize,
+      fileSize: totalSize, // ✅ FIX: totalSize → fileSize
       totalChunks,
-      metadata,
-      chunks: new Map(),
+      fileType: fileType || 'application/octet-stream', // ✅ FIX: Thêm fileType
+      thumbnailUrl, // ✅ Optional
+      uploadUrls: [], // ✅ FIX: Khởi tạo mảng rỗng
+      uploadedChunks: new Set(), // ✅ FIX: chunks Map → uploadedChunks Set
       createdAt: new Date(),
     };
 
-    uploadSessionStore.set(uploadId, session); // ✅ SỬ DỤNG SINGLETON
-    uploadSessionStore.scheduleCleanup(uploadId, 2); // ✅ Auto-cleanup sau 2 giờ
+    uploadSessionStore.set(uploadId, session);
+    uploadSessionStore.scheduleCleanup(uploadId, 2); // Auto-cleanup sau 2 giờ
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`✅ Upload session created: ${uploadId} (${elapsed}s)`);

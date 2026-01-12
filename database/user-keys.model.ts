@@ -1,21 +1,21 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/database/models/userKeys.model.ts
-import mongoose, { Document, model, models, Schema } from "mongoose";
+import mongoose, { Document, model, models, Schema, Model } from "mongoose";
 
 export interface IUserKeys extends Document {
-  user: mongoose.Types.ObjectId; // Ref to User
-  identity_key: string; // Public Identity Key (JSON string)
+  user: mongoose.Types.ObjectId;
+  identity_key: string;
   registration_id: number;
   pre_keys: {
     key_id: number;
-    public_key: string; // JSON string of Uint8Array
+    public_key: string;
     is_used: boolean;
     used_at?: Date;
   }[];
   signed_pre_key: {
     key_id: number;
-    public_key: string; // JSON string
-    signature: string; // JSON string
+    public_key: string;
+    signature: string;
     created_at: Date;
   };
   previous_signed_pre_keys: {
@@ -27,6 +27,20 @@ export interface IUserKeys extends Document {
   }[];
   created_at: Date;
   updated_at: Date;
+  // Instance methods
+  refillPreKeys(newPreKeys: { key_id: number; public_key: string }[]): Promise<this>;
+  rotateSignedPreKey(newSignedPreKey: {
+    key_id: number;
+    public_key: string;
+    signature: string;
+  }): Promise<this>;
+}
+
+// ✅ Define interface for static methods
+interface IUserKeysModel extends Model<IUserKeys> {
+  getUnusedPreKey(userId: string): Promise<{ key_id: number; public_key: string } | null>;
+  markPreKeyAsUsed(userId: string, keyId: number): Promise<any>;
+  countUnusedPreKeys(userId: string): Promise<number>;
 }
 
 const UserKeysSchema = new Schema<IUserKeys>({
@@ -142,6 +156,7 @@ UserKeysSchema.methods.rotateSignedPreKey = function (newSignedPreKey: {
   return this.save();
 };
 
-const UserKeys = models.UserKeys || model("UserKeys", UserKeysSchema);
+// ✅ Use IUserKeysModel interface when creating model
+const UserKeys = (models.UserKeys || model<IUserKeys, IUserKeysModel>("UserKeys", UserKeysSchema)) as IUserKeysModel;
 
 export default UserKeys;

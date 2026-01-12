@@ -8,10 +8,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const result = await getConversationById(params.id);
+    const { id } = await context.params;
+    const result = await getConversationById(id);
 
     if (!result.success) {
       return NextResponse.json(
@@ -36,12 +37,13 @@ export async function GET(
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await context.params;
     const body: UpdateConversationDTO = await req.json();
 
-    const result = await updateConversation(params.id, body);
+    const result = await updateConversation(id, body);
 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 });
@@ -63,10 +65,11 @@ export async function PUT(
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const result = await deleteConversation(params.id);
+    const { id } = await context.params;
+    const result = await deleteConversation(id);
 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 });

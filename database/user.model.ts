@@ -47,8 +47,8 @@ export interface IUser extends Document {
   // Encryption fields
   encryption_public_key?: string;
   encryption_key_uploaded_at?: Date;
-  encryption_backup?: IKeyBackupData; // ✅ NEW: Encrypted backup
-  encryption_backup_created_at?: Date; // ✅ NEW: Backup timestamp
+  encryption_backup?: IKeyBackupData;
+  encryption_backup_created_at?: Date;
   status?: string;
   created_at: Date;
   updated_at: Date;
@@ -120,24 +120,15 @@ const UserSchema = new Schema<IUser>({
     type: Date,
     default: null,
   },
-  // ✅ NEW: Encrypted backup storage
+  // ✅ Encrypted backup storage
   encryption_backup: {
-    type: Schema.Types.Mixed, // Stores IKeyBackupData
+    type: Schema.Types.Mixed,
     default: null,
   },
   encryption_backup_created_at: {
     type: Date,
     default: null,
   },
-   encryption_public_key: { 
-      type: String, 
-      default: null,
-      index: true, // ✅ Index for faster queries
-    },
-    encryption_key_uploaded_at: {
-      type: Date,
-      default: null,
-    },
   status: { type: String, maxlength: 100 },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },

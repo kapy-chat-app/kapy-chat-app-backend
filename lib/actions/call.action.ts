@@ -13,7 +13,7 @@ import PushToken from "@/database/push-token.model";
 import { sendCallNotification as sendFCMCallNotification, isValidFCMToken } from '../services/fcm.service';
 import { sendCallNotification as sendExpoCallNotification } from '../pushNotification';
 import Message from "@/database/message.model";
-
+import mongoose from "mongoose";
 /**
  * ⭐ UPDATED: Create call log message with different statuses
  */
@@ -60,7 +60,7 @@ async function createCallLogMessage(params: {
       console.log("📱 Processing GROUP CALL message");
 
       let content = "";
-      let metadata: any = {
+      const metadata: any = {
         isSystemMessage: true,
         action: "call_log",
         call_id: callId,
@@ -104,20 +104,19 @@ async function createCallLogMessage(params: {
           metadata,
         });
 
-        console.log("✅ Message CREATED:", message._id);
 
         await emitSocketEvent(
           "newMessage",
           conversationId,
           {
-            message_id: message._id.toString(),
+            message_id: (message._id as mongoose.Types.ObjectId).toString(),
             conversation_id: conversationId,
             sender_id: callerId,
             sender_name: caller.full_name,
             message_content: content,
             message_type: "text",
             message: {
-              _id: message._id.toString(),
+              _id: (message._id as mongoose.Types.ObjectId).toString(),
               conversation: conversationId,
               sender: {
                 clerkId: callerId,
@@ -140,7 +139,7 @@ async function createCallLogMessage(params: {
         );
 
         console.log("✅ newMessage emitted");
-        return message._id.toString();
+        return (message._id as mongoose.Types.ObjectId).toString();
       } else {
         // Update existing message or create new one
         const existingMessage = await Message.findOne({
@@ -157,14 +156,14 @@ async function createCallLogMessage(params: {
           await existingMessage.save();
 
           await emitSocketEvent("updateMessage", conversationId, {
-            message_id: existingMessage._id.toString(),
+            message_id: (existingMessage._id as mongoose.Types.ObjectId).toString(),
             user_id: callerId,
             new_content: content,
             metadata,
             edited_at: new Date(),
           });
 
-          return existingMessage._id.toString();
+          return (existingMessage._id as mongoose.Types.ObjectId).toString();
         } else {
           console.log("✅ Creating new message");
           
@@ -180,14 +179,14 @@ async function createCallLogMessage(params: {
             "newMessage",
             conversationId,
             {
-              message_id: message._id.toString(),
+              message_id: (message._id as mongoose.Types.ObjectId).toString(),
               conversation_id: conversationId,
               sender_id: callerId,
               sender_name: caller.full_name,
               message_content: content,
               message_type: "text",
               message: {
-                _id: message._id.toString(),
+                _id: (message._id as mongoose.Types.ObjectId).toString(),
                 conversation: conversationId,
                 sender: {
                   clerkId: callerId,
@@ -209,7 +208,7 @@ async function createCallLogMessage(params: {
             true
           );
 
-          return message._id.toString();
+          return (message._id as mongoose.Types.ObjectId).toString();
         }
       }
     } else {
@@ -261,14 +260,14 @@ async function createCallLogMessage(params: {
         "newMessage",
         conversationId,
         {
-          message_id: message._id.toString(),
+          message_id: (message._id as mongoose.Types.ObjectId).toString(),
           conversation_id: conversationId,
           sender_id: callerId,
           sender_name: caller.full_name,
           message_content: content,
           message_type: "text",
           message: {
-            _id: message._id.toString(),
+            _id: (message._id as mongoose.Types.ObjectId).toString(),
             conversation: conversationId,
             sender: {
               clerkId: callerId,
@@ -291,7 +290,7 @@ async function createCallLogMessage(params: {
       );
 
       console.log("✅ newMessage emitted");
-      return message._id.toString();
+      return (message._id as mongoose.Types.ObjectId).toString();
     }
 
     console.log("🔔 ========== CREATE CALL LOG MESSAGE COMPLETED ==========");
@@ -439,7 +438,7 @@ export async function initiateCall(params: {
         callerId: userId,
         type,
         status: "ongoing",
-        participants: participants.map(p => p.user.toString()),
+        participants: participants.map((p:any) => p.user.toString()),
       });
     }
 
@@ -772,7 +771,7 @@ export async function endCall(params: {
 
     // ⭐ Determine call outcome based on CURRENT status
     let callOutcome: "ended" | "rejected" | "missed" = "ended";
-    let previousStatus = call.status;
+    const previousStatus = call.status;
     
     if (call.status === "rejected") {
       callOutcome = "rejected";
