@@ -26,7 +26,6 @@ import {
   PhoneCall,
 } from "lucide-react";
 import Image from "next/image";
-import Link from "next/link";
 import { UserDetailResponse } from "@/dtos/user-management.dto";
 import {
   getUserDetail,
@@ -34,9 +33,9 @@ import {
 } from "@/lib/actions/user.management.action";
 
 interface UserDetailPageProps {
-  params: {
+  params: Promise<{
     userId: string;
-  };
+  }>;
 }
 
 const UserDetailPage = ({ params }: UserDetailPageProps) => {
@@ -45,13 +44,23 @@ const UserDetailPage = ({ params }: UserDetailPageProps) => {
   const [userDetail, setUserDetail] = useState<UserDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [userId, setUserId] = useState<string>("");
+
+  // Unwrap params
+  useEffect(() => {
+    params.then((resolvedParams) => {
+      setUserId(resolvedParams.userId);
+    });
+  }, [params]);
 
   // Fetch user detail
   const fetchUserDetail = async () => {
+    if (!userId) return;
+
     try {
       setLoading(true);
       setError(null);
-      const response = await getUserDetail(params.userId);
+      const response = await getUserDetail(userId);
       setUserDetail(response);
     } catch (err: any) {
       setError(err.message || "Failed to load user details");
@@ -62,8 +71,10 @@ const UserDetailPage = ({ params }: UserDetailPageProps) => {
   };
 
   useEffect(() => {
-    fetchUserDetail();
-  }, [params.userId]);
+    if (userId) {
+      fetchUserDetail();
+    }
+  }, [userId]);
 
   // Handle user action
   const handleUserAction = async (
@@ -75,7 +86,7 @@ const UserDetailPage = ({ params }: UserDetailPageProps) => {
 
     try {
       setProcessing(true);
-      await updateUserStatus({ userId: params.userId, action });
+      await updateUserStatus({ userId, action });
       alert(`User ${action}ed successfully`);
       await fetchUserDetail();
     } catch (error: any) {
@@ -85,7 +96,7 @@ const UserDetailPage = ({ params }: UserDetailPageProps) => {
     }
   };
 
-  if (loading) {
+  if (loading || !userId) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-blue-600" />

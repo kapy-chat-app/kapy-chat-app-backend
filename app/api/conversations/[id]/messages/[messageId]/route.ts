@@ -1,4 +1,4 @@
-// app/api/messages/[messageId]/route.ts - UPDATED WITH REACTIONS
+// app/api/conversations/[id]/messages/[messageId]/route.ts - UPDATED WITH REACTIONS
 import { ReactionType } from "@/dtos/message.dto";
 import {
   updateMessage,
@@ -9,21 +9,42 @@ import {
   toggleReaction,
   getReactionCounts,
   getUsersWhoReacted,
+  recallMessage,
 } from "@/lib/actions/message.action";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+  context: { params: Promise<{ messageId: string }> }
 ) {
   try {
+    const { messageId } = await context.params;
     const body = await req.json();
-
+    
     // ==========================================
     // ✅ EDIT MESSAGE
     // ==========================================
     if (body.action === "edit" && body.content) {
-      const result = await updateMessage(params.messageId, body.content);
+      const result = await updateMessage(
+        messageId,
+        body.content || "",
+        body.encryptedContent,
+        body.encryptionMetadata
+      );
+
+      if (!result.success) {
+        return NextResponse.json({ error: result.error }, { status: 400 });
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: result.data,
+        timestamp: new Date(),
+      });
+    }
+    
+    if (body.action === "recall") {
+      const result = await recallMessage(messageId);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -62,9 +83,9 @@ export async function PUT(
       // ✨ NEW: Support toggle mode
       let result;
       if (body.toggle === true) {
-        result = await toggleReaction(params.messageId, reactionType);
+        result = await toggleReaction(messageId, reactionType);
       } else {
-        result = await addReaction(params.messageId, reactionType);
+        result = await addReaction(messageId, reactionType);
       }
 
       if (!result.success) {
@@ -82,7 +103,7 @@ export async function PUT(
     // ✅ MARK AS READ
     // ==========================================
     if (body.action === "read") {
-      const result = await markAsRead(params.messageId);
+      const result = await markAsRead(messageId);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -107,9 +128,10 @@ export async function PUT(
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+  context: { params: Promise<{ messageId: string }> }
 ) {
   try {
+    const { messageId } = await context.params;
     const { searchParams } = new URL(req.url);
     const deleteType =
       (searchParams.get("type") as "only_me" | "both" | "remove_reaction") ||
@@ -119,7 +141,7 @@ export async function DELETE(
     // ✨ REMOVE REACTION - UPDATED
     // ==========================================
     if (deleteType === "remove_reaction") {
-      const result = await removeReaction(params.messageId);
+      const result = await removeReaction(messageId);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -135,7 +157,7 @@ export async function DELETE(
     // ==========================================
     // ✅ DELETE MESSAGE
     // ==========================================
-    const result = await deleteMessage(params.messageId, deleteType);
+    const result = await deleteMessage(messageId, deleteType);
 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 });
@@ -160,15 +182,16 @@ export async function DELETE(
 // ==========================================
 export async function GET(
   req: NextRequest,
-  { params }: { params: { messageId: string } }
+  context: { params: Promise<{ messageId: string }> }
 ) {
   try {
+    const { messageId } = await context.params;
     const { searchParams } = new URL(req.url);
     const action = searchParams.get("action");
 
     // Get reaction counts
     if (action === "counts") {
-      const result = await getReactionCounts(params.messageId);
+      const result = await getReactionCounts(messageId);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });
@@ -186,7 +209,7 @@ export async function GET(
       const reactionType = searchParams.get("reactionType") as
         | ReactionType
         | undefined;
-      const result = await getUsersWhoReacted(params.messageId, reactionType);
+      const result = await getUsersWhoReacted(messageId, reactionType);
 
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 400 });

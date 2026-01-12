@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node socket-server.js",
-    "dev:next": "next dev",
+    "dev:next": "next dev -p 3000",
     "dev:socket": "node socket-server.js",
+    "dev": "NODE_ENV=development node socket-server.js",
     "build": "next build",
-    "start": "next start",
+    "start": "NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 node socket-server.js",
     "lint": "eslint"
   },
   "dependencies": {
@@ -22,6 +22,7 @@
     "canvas": "^3.2.0",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "expo-server-sdk": "^4.0.0",
     "express": "^5.1.0",
     "face-api.js": "^0.22.2",

@@ -12,10 +12,10 @@ interface PlayGameData {
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { slug: string } }
+  context: { params: Promise<{ slug: string }> }
 ) {
   try {
-    const { slug } = params;
+    const { slug } = await context.params;
     const body = await req.json();
     const { userId } = body;
 

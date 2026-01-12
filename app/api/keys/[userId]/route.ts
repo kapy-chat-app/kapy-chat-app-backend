@@ -6,9 +6,10 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { userId: string } }
+  context: { params: Promise<{ userId: string }> }
 ) {
   try {
+    const { userId } = await context.params;
     await connectToDatabase();
     const { userId: currentUserId } = await auth();
     if (!currentUserId) {
@@ -16,7 +17,7 @@ export async function GET(
     }
 
     // ✅ Tìm user theo clerkId
-    const targetUser = await User.findOne({ clerkId: params.userId });
+    const targetUser = await User.findOne({ clerkId: userId });
     if (!targetUser) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }

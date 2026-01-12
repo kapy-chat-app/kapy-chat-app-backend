@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // lib/services/fcm.service.ts - NEW FILE
 import { getFirebaseAdmin } from '../firebase-admin';
 

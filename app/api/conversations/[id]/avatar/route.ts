@@ -3,10 +3,10 @@ import { updateGroupAvatar } from '@/lib/actions/conversation.action';
 
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await context.params;
     const formData = await req.formData();
     const avatarFile = formData.get('avatar') as File;
 

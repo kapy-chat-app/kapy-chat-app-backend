@@ -240,8 +240,11 @@ export async function getUserDetail(
       throw new Error("User not found");
     }
 
+    // ✅ FIX: Type cast mongoUser
+    const userDoc = mongoUser as any;
+
     // Combine with Clerk data
-    const combinedUser = await combineUserData(mongoUser);
+    const combinedUser = await combineUserData(userDoc);
 
     // Calculate statistics (you can expand this)
     const statistics = {
@@ -249,9 +252,9 @@ export async function getUserDetail(
       totalMessages: 0, // TODO: Query from Message model
       totalCalls: 0, // TODO: Query from Call model
       totalFriends: 0, // TODO: Query from Friendship model
-      accountAge: calculateAccountAge(mongoUser.created_at),
-      lastActivity: mongoUser.last_seen
-        ? formatLastActivity(mongoUser.last_seen)
+      accountAge: calculateAccountAge(userDoc.created_at), // ✅ FIX
+      lastActivity: userDoc.last_seen // ✅ FIX
+        ? formatLastActivity(userDoc.last_seen) // ✅ FIX
         : "Never",
     };
 

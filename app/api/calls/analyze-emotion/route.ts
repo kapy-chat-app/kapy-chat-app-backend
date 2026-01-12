@@ -9,6 +9,8 @@ import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitToCallRoom } from "@/lib/socket.helper";
 import * as faceapi from "face-api.js";
 import * as canvas from "canvas";
+import * as fs from "fs"; // ✅ Fix: Import ở đầu file thay vì require
+import * as path from "path"; // ✅ Fix: Import ở đầu file thay vì require
 import Groq from "groq-sdk";
 import {
   shouldSendAdvice,
@@ -17,7 +19,7 @@ import {
 
 // ⭐ Setup face-api.js with canvas
 const { Canvas, Image, ImageData } = canvas;
-// @ts-ignore
+// @ts-expect-error - face-api.js types don't include monkeyPatch
 faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 
 let modelsLoaded = false;
@@ -265,8 +267,7 @@ async function analyzeVideoWithFaceAPI(videoBlob: Blob) {
 
     const debugPath = `./public/debug-frames/frame-${Date.now()}.jpg`;
     try {
-      const fs = require("fs");
-      const path = require("path");
+      // ✅ Fix: Sử dụng import thay vì require
       const dir = path.dirname(debugPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });

@@ -404,7 +404,7 @@ export async function getEmotionHistory(params: GetEmotionHistoryParams = {}) {
     return {
       success: true,
       data: {
-        emotions: emotions as EmotionAnalysisDTO[],
+        emotions: emotions as unknown as EmotionAnalysisDTO[], // ✅ FIX: Cast through unknown
         pagination: {
           total,
           limit,
@@ -421,6 +421,7 @@ export async function getEmotionHistory(params: GetEmotionHistoryParams = {}) {
     };
   }
 }
+
 
 // ============================================
 // GET EMOTION STATISTICS

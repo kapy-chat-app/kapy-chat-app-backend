@@ -3,6 +3,12 @@
 const INACTIVITY_TIMEOUT = 30000; // 30 seconds
 const CLEANUP_INTERVAL = 60000; // 1 minute
 
+// ✅ Declare global type
+declare global {
+  // eslint-disable-next-line no-var
+  var activeUsersMap: Map<string, { lastActivity: number; socketId: string }> | undefined;
+}
+
 // ✅ Global Map để share state giữa socket-server.js và API routes
 if (!global.activeUsersMap) {
   global.activeUsersMap = new Map<string, { lastActivity: number; socketId: string }>();
@@ -18,7 +24,7 @@ export function setUserActiveInConversation(
   socketId: string
 ): void {
   const key = getKey(userId, conversationId);
-  global.activeUsersMap.set(key, {
+  global.activeUsersMap!.set(key, {
     lastActivity: Date.now(),
     socketId,
   });
@@ -30,7 +36,7 @@ export function setUserInactiveInConversation(
   conversationId: string
 ): void {
   const key = getKey(userId, conversationId);
-  global.activeUsersMap.delete(key);
+  global.activeUsersMap!.delete(key);
   console.log(`[ACTIVE_USERS] 👋 User ${userId} marked as INACTIVE in ${conversationId}`);
 }
 
@@ -39,7 +45,7 @@ export function updateUserActivity(
   conversationId: string
 ): void {
   const key = getKey(userId, conversationId);
-  const entry = global.activeUsersMap.get(key);
+  const entry = global.activeUsersMap!.get(key);
   if (entry) {
     entry.lastActivity = Date.now();
     console.log(`[ACTIVE_USERS] 🔄 Activity updated for ${userId}`);
@@ -51,7 +57,7 @@ export function isUserActiveInConversation(
   conversationId: string
 ): boolean {
   const key = getKey(userId, conversationId);
-  const entry = global.activeUsersMap.get(key);
+  const entry = global.activeUsersMap!.get(key);
 
   if (!entry) {
     console.log(`[ACTIVE_USERS] ❌ User ${userId} NOT found in ${conversationId}`);
@@ -69,9 +75,9 @@ export function isUserActiveInConversation(
 
 export function removeUserFromAllConversations(userId: string): void {
   let removedCount = 0;
-  for (const key of global.activeUsersMap.keys()) {
+  for (const key of global.activeUsersMap!.keys()) {
     if (key.startsWith(`${userId}:`)) {
-      global.activeUsersMap.delete(key);
+      global.activeUsersMap!.delete(key);
       removedCount++;
     }
   }
@@ -85,9 +91,9 @@ setInterval(() => {
   const now = Date.now();
   let cleanedCount = 0;
 
-  for (const [key, entry] of global.activeUsersMap.entries()) {
+  for (const [key, entry] of global.activeUsersMap!.entries()) {
     if (now - entry.lastActivity > INACTIVITY_TIMEOUT) {
-      global.activeUsersMap.delete(key);
+      global.activeUsersMap!.delete(key);
       cleanedCount++;
     }
   }

@@ -340,7 +340,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       fileId: file._id.toString(),
-      messageId: message._id.toString(),
+      messageId: (message._id as string).toString(),
       url: completeResult.url,
       key: completeResult.key,
       thumbnailUrl: session.thumbnailUrl,

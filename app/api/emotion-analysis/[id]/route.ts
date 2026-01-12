@@ -4,10 +4,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const result = await deleteEmotionAnalysis(params.id);
+    const { id } = await context.params;
+    const result = await deleteEmotionAnalysis(id);
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(

@@ -1,6 +1,5 @@
 // app/api/files/[id]/stream/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
 import File from '@/database/file.model';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -15,9 +14,11 @@ const s3Client = new S3Client({
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id: fileId } = await context.params;
+    
     // ✅ CORRECT: Get Bearer token from Authorization header (for mobile app)
     const authHeader = req.headers.get('Authorization');
     
@@ -33,8 +34,6 @@ export async function GET(
     // const { userId } = await verifyToken(token);
     
     console.log(`👤 [STREAM] Authenticated request with token`);
-
-    const fileId = params.id;
     console.log(`🎥 [STREAM] Request for file: ${fileId}`);
 
     // ✅ Get file metadata from database

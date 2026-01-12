@@ -3,10 +3,10 @@ import { getGroupMembers } from '@/lib/actions/conversation.action';
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await context.params;
     const { searchParams } = new URL(req.url);
     
     const page = parseInt(searchParams.get('page') || '1');

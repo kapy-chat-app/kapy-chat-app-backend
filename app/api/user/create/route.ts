@@ -28,10 +28,10 @@ export async function POST(request: NextRequest) {
 
     const body: CreateUserBody = await request.json();
 
-    // Validate required fields (không cần clerkId nữa)
-    const requiredFields = ["email", "full_name", "username"];
+    // ✅ FIX: Validate required fields với type assertion
+    const requiredFields = ["email", "full_name", "username"] as const;
     for (const field of requiredFields) {
-      if (!body[field]) {
+      if (!body[field as keyof CreateUserBody]) {
         return NextResponse.json(
           { success: false, error: `${field} is required` },
           { status: 400 }
@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
 
     // Tạo user với clerkId từ token
     const result = await createUser({
-      clerkId: userId, // Từ JWT token, không từ frontend
+      clerkId: userId,
       email: body.email,
       full_name: body.full_name,
       username: body.username,

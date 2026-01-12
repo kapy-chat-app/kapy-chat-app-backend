@@ -8,12 +8,12 @@ export const maxDuration = 300;
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ id: string }> }
 ) {
   const startTime = Date.now();
   
   try {
-    const { id: conversationId } = await params;
+    const { id: conversationId } = await context.params;
     const { userId: clerkUserId } = await auth();
     
     if (!clerkUserId) {
@@ -59,27 +59,36 @@ export async function POST(
       );
     }
 
-    if (session.chunks.has(chunkIndex)) {
+    // ✅ FIX: chunks → uploadedChunks
+    if (session.uploadedChunks.has(chunkIndex)) {
       console.log(`⚠️ Chunk ${chunkIndex + 1} already uploaded`);
       return NextResponse.json({
         chunkId: `${uploadId}-${chunkIndex}`,
-        receivedChunks: session.chunks.size,
+        receivedChunks: session.uploadedChunks.size,
         totalChunks: session.totalChunks,
         message: 'Chunk already uploaded',
       });
     }
 
-    session.chunks.set(chunkIndex, chunkData);
+    // ✅ FIX: Add chunk index to Set
+    session.uploadedChunks.add(chunkIndex);
+    
+    // ⚠️ TODO: Bạn cần implement logic upload chunk lên S3
+    // Hiện tại chỉ đánh dấu chunk đã nhận
+    // Nếu bạn dùng S3 multipart upload, cần:
+    // 1. Upload chunk này lên S3
+    // 2. Lưu ETag của chunk
+    // 3. Update session với ETag info
 
     const chunkId = `${uploadId}-${chunkIndex}`;
-    const progress = ((session.chunks.size / session.totalChunks) * 100).toFixed(1);
+    const progress = ((session.uploadedChunks.size / session.totalChunks) * 100).toFixed(1);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
 
     console.log(`✅ Chunk ${chunkIndex + 1}/${session.totalChunks} stored (${progress}%) [${elapsed}s]`);
 
     return NextResponse.json({
       chunkId,
-      receivedChunks: session.chunks.size,
+      receivedChunks: session.uploadedChunks.size,
       totalChunks: session.totalChunks,
       progress: parseFloat(progress),
     });

@@ -13,7 +13,7 @@ import PushToken from "@/database/push-token.model";
 import { sendCallNotification as sendFCMCallNotification, isValidFCMToken } from '../services/fcm.service';
 import { sendCallNotification as sendExpoCallNotification } from '../pushNotification';
 import Message from "@/database/message.model";
-
+import mongoose from "mongoose";
 /**
  * ⭐ UPDATED: Create call log message with different statuses
  */
@@ -60,7 +60,7 @@ async function createCallLogMessage(params: {
       console.log("📱 Processing GROUP CALL message");
 
       let content = "";
-      let metadata: any = {
+      const metadata: any = {
         isSystemMessage: true,
         action: "call_log",
         call_id: callId,
@@ -104,20 +104,19 @@ async function createCallLogMessage(params: {
           metadata,
         });
 
-        console.log("✅ Message CREATED:", message._id);
 
         await emitSocketEvent(
           "newMessage",
           conversationId,
           {
-            message_id: message._id.toString(),
+            message_id: (message._id as mongoose.Types.ObjectId).toString(),
             conversation_id: conversationId,
             sender_id: callerId,
             sender_name: caller.full_name,
             message_content: content,
             message_type: "text",
             message: {
-              _id: message._id.toString(),
+              _id: (message._id as mongoose.Types.ObjectId).toString(),
               conversation: conversationId,
               sender: {
                 clerkId: callerId,
@@ -140,7 +139,7 @@ async function createCallLogMessage(params: {
         );
 
         console.log("✅ newMessage emitted");
-        return message._id.toString();
+        return (message._id as mongoose.Types.ObjectId).toString();
       } else {
         // Update existing message or create new one
         const existingMessage = await Message.findOne({
@@ -157,14 +156,14 @@ async function createCallLogMessage(params: {
           await existingMessage.save();
 
           await emitSocketEvent("updateMessage", conversationId, {
-            message_id: existingMessage._id.toString(),
+            message_id: (existingMessage._id as mongoose.Types.ObjectId).toString(),
             user_id: callerId,
             new_content: content,
             metadata,
             edited_at: new Date(),
           });
 
-          return existingMessage._id.toString();
+          return (existingMessage._id as mongoose.Types.ObjectId).toString();
         } else {
           console.log("✅ Creating new message");
           
@@ -180,14 +179,14 @@ async function createCallLogMessage(params: {
             "newMessage",
             conversationId,
             {
-              message_id: message._id.toString(),
+              message_id: (message._id as mongoose.Types.ObjectId).toString(),
               conversation_id: conversationId,
               sender_id: callerId,
               sender_name: caller.full_name,
               message_content: content,
               message_type: "text",
               message: {
-                _id: message._id.toString(),
+                _id: (message._id as mongoose.Types.ObjectId).toString(),
                 conversation: conversationId,
                 sender: {
                   clerkId: callerId,
@@ -209,7 +208,7 @@ async function createCallLogMessage(params: {
             true
           );
 
-          return message._id.toString();
+          return (message._id as mongoose.Types.ObjectId).toString();
         }
       }
     } else {
@@ -261,14 +260,14 @@ async function createCallLogMessage(params: {
         "newMessage",
         conversationId,
         {
-          message_id: message._id.toString(),
+          message_id: (message._id as mongoose.Types.ObjectId).toString(),
           conversation_id: conversationId,
           sender_id: callerId,
           sender_name: caller.full_name,
           message_content: content,
           message_type: "text",
           message: {
-            _id: message._id.toString(),
+            _id: (message._id as mongoose.Types.ObjectId).toString(),
             conversation: conversationId,
             sender: {
               clerkId: callerId,
@@ -291,7 +290,7 @@ async function createCallLogMessage(params: {
       );
 
       console.log("✅ newMessage emitted");
-      return message._id.toString();
+      return (message._id as mongoose.Types.ObjectId).toString();
     }
 
     console.log("🔔 ========== CREATE CALL LOG MESSAGE COMPLETED ==========");
@@ -303,6 +302,64 @@ async function createCallLogMessage(params: {
   }
 }
 
+/**
+ * ⚡ Async notification sender (non-blocking)
+ */
+async function sendCallNotificationsAsync(params: {
+  otherParticipants: any[];
+  callData: any;
+}) {
+  const { otherParticipants, callData } = params;
+
+  try {
+    for (const participant of otherParticipants) {
+      if (!participant.clerkId) continue;
+
+      const participantUser = await User.findOne({
+        clerkId: participant.clerkId,
+      });
+
+      if (!participantUser) {
+        console.log(`⚠️ User not found: ${participant.clerkId}`);
+        continue;
+      }
+
+      const pushTokenDoc = await PushToken.findOne({
+        user: participantUser._id,
+        is_active: true,
+      }).sort({ last_used: -1 });
+
+      if (!pushTokenDoc?.token) {
+        console.log(`⚠️ No push token for user: ${participant.clerkId}`);
+        continue;
+      }
+
+      const token = pushTokenDoc.token;
+      let ticket;
+
+      if (isValidFCMToken(token)) {
+        console.log(`📱 Sending FCM notification to ${participant.clerkId}`);
+        ticket = await sendFCMCallNotification({
+          fcmToken: token,
+          ...callData,
+        });
+      } else {
+        console.log(`📱 Sending Expo notification to ${participant.clerkId}`);
+        ticket = await sendExpoCallNotification({
+          pushToken: token,
+          ...callData,
+        });
+      }
+
+      if (ticket?.status === "ok") {
+        console.log(`✅ Notification delivered to ${participant.clerkId}`);
+      }
+    }
+  } catch (error) {
+    console.error("⚠️ Notification batch error:", error);
+    // Don't throw - this runs async
+  }
+}
 
 /**
  * Initiate a new call - WITH FCM SUPPORT
@@ -381,7 +438,7 @@ export async function initiateCall(params: {
         callerId: userId,
         type,
         status: "ongoing",
-        participants: participants.map(p => p.user.toString()),
+        participants: participants.map((p:any) => p.user.toString()),
       });
     }
 
@@ -431,8 +488,9 @@ export async function initiateCall(params: {
     }
 
     // ⭐ UPDATED: Send push notifications with FCM/Expo detection
-    try {
-      const notificationData = {
+    sendCallNotificationsAsync({
+      otherParticipants,
+      callData: {
         callerName: displayName,
         callType: type,
         callId: call._id.toString(),
@@ -444,66 +502,8 @@ export async function initiateCall(params: {
         conversationName: conversation.name || displayName,
         conversationAvatar: displayAvatar,
         participantsCount: call.participants.length - 1,
-      };
-
-      for (const participant of otherParticipants) {
-        if (!participant.clerkId) continue;
-
-        const participantUser = await User.findOne({
-          clerkId: participant.clerkId,
-        });
-
-        if (!participantUser) {
-          console.log(`⚠️ User not found: ${participant.clerkId}`);
-          continue;
-        }
-
-        const pushTokenDoc = await PushToken.findOne({
-          user: participantUser._id,
-          is_active: true,
-        }).sort({ last_used: -1 });
-
-        if (!pushTokenDoc?.token) {
-          console.log(`⚠️ No push token for user: ${participant.clerkId}`);
-          continue;
-        }
-
-        let ticket;
-        const token = pushTokenDoc.token;
-
-        // ⭐ Detect token type and send appropriate notification
-        if (isValidFCMToken(token)) {
-          // ✅ FCM Token - Use Firebase Admin SDK (full-screen on Android)
-          console.log(`📱 Sending FCM notification to ${participant.clerkId}`);
-          
-          ticket = await sendFCMCallNotification({
-            fcmToken: token,
-            ...notificationData,
-          });
-
-          console.log(`✅ FCM sent:`, ticket);
-        } else {
-          // ✅ Expo Token - Use Expo Push Service (iOS/Expo Go)
-          console.log(`📱 Sending Expo notification to ${participant.clerkId}`);
-          
-          ticket = await sendExpoCallNotification({
-            pushToken: token,
-            ...notificationData,
-          });
-
-          console.log(`✅ Expo sent:`, ticket);
-        }
-
-        if (ticket?.status === "ok") {
-          console.log(`✅ Call notification delivered to ${participant.clerkId}`);
-        } else {
-          console.error(`❌ Failed to send notification to ${participant.clerkId}:`, ticket);
-        }
-      }
-    } catch (notifError) {
-      console.error("⚠️ Failed to send call notifications:", notifError);
-      // Don't throw - call should still work via socket
-    }
+      },
+    }).catch(err => console.error("⚠️ Async notification error:", err));
 
     return {
       success: true,
@@ -771,7 +771,7 @@ export async function endCall(params: {
 
     // ⭐ Determine call outcome based on CURRENT status
     let callOutcome: "ended" | "rejected" | "missed" = "ended";
-    let previousStatus = call.status;
+    const previousStatus = call.status;
     
     if (call.status === "rejected") {
       callOutcome = "rejected";

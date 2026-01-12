@@ -3,10 +3,10 @@ import { addParticipants } from '@/lib/actions/conversation.action';
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await context.params;
     const { participantIds } = await req.json();
 
     if (!participantIds || !Array.isArray(participantIds) || participantIds.length === 0) {

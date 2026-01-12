@@ -1,13 +1,13 @@
-// app/api/conversations/[conversationId]/history/route.ts
+// app/api/conversations/[id]/history/route.ts
 import { getConversationHistory } from "@/lib/actions/conversation.action";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { conversationId: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { conversationId } = params;
+    const { id: conversationId } = await context.params;
     
     // Get query params
     const searchParams = req.nextUrl.searchParams;

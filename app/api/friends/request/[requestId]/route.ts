@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 // DELETE /api/friends/request/[requestId] - Cancel a friend request
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { requestId: string } }
+  context: { params: Promise<{ requestId: string }> }
 ) {
   try {
     const { userId: clerkId } = await auth();
@@ -17,7 +17,7 @@ export async function DELETE(
       );
     }
 
-    const { requestId } = params;
+    const { requestId } = await context.params;
 
     if (!requestId) {
       return NextResponse.json(
