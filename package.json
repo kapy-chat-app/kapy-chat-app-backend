@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev:next": "next dev -p 3000",
+    "dev": "node socket-server.js",
+    "dev:next": "next dev",
     "dev:socket": "node socket-server.js",
-    "dev": "NODE_ENV=development node socket-server.js",
     "build": "next build",
     "start": "NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000 node socket-server.js",
     "lint": "eslint"
