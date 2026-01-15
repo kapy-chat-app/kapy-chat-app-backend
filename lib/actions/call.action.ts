@@ -10,8 +10,11 @@ import EmotionAnalysis from "@/database/emotion-analysis.model";
 import { emitSocketEvent, emitToUserRoom } from "@/lib/socket.helper";
 import { clerkClient } from "@clerk/nextjs/server";
 import PushToken from "@/database/push-token.model";
-import { sendCallNotification as sendFCMCallNotification, isValidFCMToken } from '../services/fcm.service';
-import { sendCallNotification as sendExpoCallNotification } from '../pushNotification';
+import {
+  sendCallNotification as sendFCMCallNotification,
+  isValidFCMToken,
+} from "../services/fcm.service";
+import { sendCallNotification as sendExpoCallNotification } from "../pushNotification";
 import Message from "@/database/message.model";
 import mongoose from "mongoose";
 /**
@@ -30,7 +33,15 @@ async function createCallLogMessage(params: {
     console.log("🔔 ========== CREATE CALL LOG MESSAGE ==========");
     console.log("📋 Params:", params);
 
-    const { conversationId, callId, callerId, type, status, duration, participants } = params;
+    const {
+      conversationId,
+      callId,
+      callerId,
+      type,
+      status,
+      duration,
+      participants,
+    } = params;
 
     await connectToDatabase();
 
@@ -46,10 +57,10 @@ async function createCallLogMessage(params: {
       console.error("❌ Conversation not found:", conversationId);
       throw new Error("Conversation not found");
     }
-    console.log("✅ Conversation found:", { 
-      id: conversation._id, 
+    console.log("✅ Conversation found:", {
+      id: conversation._id,
       type: conversation.type,
-      name: conversation.name 
+      name: conversation.name,
     });
 
     const isGroup = conversation.type === "group";
@@ -81,11 +92,12 @@ async function createCallLogMessage(params: {
         metadata.call_status = "missed";
       } else {
         // ended
-        const durationText = duration && duration > 0
-          ? duration < 60
-            ? `${duration} seconds`
-            : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
-          : "Less than a second";
+        const durationText =
+          duration && duration > 0
+            ? duration < 60
+              ? `${duration} seconds`
+              : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
+            : "Less than a second";
 
         content = `📞 Group call ended - Duration: ${durationText}`;
         metadata.call_status = "ended";
@@ -103,7 +115,6 @@ async function createCallLogMessage(params: {
           type: "text",
           metadata,
         });
-
 
         await emitSocketEvent(
           "newMessage",
@@ -150,13 +161,15 @@ async function createCallLogMessage(params: {
 
         if (existingMessage) {
           console.log("✅ Updating existing message");
-          
+
           existingMessage.content = content;
           existingMessage.metadata = metadata;
           await existingMessage.save();
 
           await emitSocketEvent("updateMessage", conversationId, {
-            message_id: (existingMessage._id as mongoose.Types.ObjectId).toString(),
+            message_id: (
+              existingMessage._id as mongoose.Types.ObjectId
+            ).toString(),
             user_id: callerId,
             new_content: content,
             metadata,
@@ -166,7 +179,7 @@ async function createCallLogMessage(params: {
           return (existingMessage._id as mongoose.Types.ObjectId).toString();
         } else {
           console.log("✅ Creating new message");
-          
+
           const message = await Message.create({
             conversation: conversationId,
             sender: caller._id,
@@ -214,21 +227,22 @@ async function createCallLogMessage(params: {
     } else {
       // ⭐ CASE 2: Private call
       console.log("📱 Processing PRIVATE CALL message");
-      
+
       let content = "";
       const callTypeText = type === "video" ? "Video" : "Audio";
-      
+
       if (status === "rejected") {
         content = `📞 ${callTypeText} call was declined`;
       } else if (status === "missed") {
         content = `📞 Missed ${callTypeText.toLowerCase()} call`;
       } else {
         // ended
-        const durationText = duration && duration > 0
-          ? duration < 60
-            ? `${duration} seconds`
-            : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
-          : "Less than a second";
+        const durationText =
+          duration && duration > 0
+            ? duration < 60
+              ? `${duration} seconds`
+              : `${Math.floor(duration / 60)} minutes ${duration % 60} seconds`
+            : "Less than a second";
 
         content = `📞 ${callTypeText} call ended - Duration: ${durationText}`;
       }
@@ -374,7 +388,9 @@ export async function initiateCall(params: {
 
     await connectToDatabase();
 
-    const callerUser = await User.findOne({ clerkId: userId }).populate("avatar");
+    const callerUser = await User.findOne({ clerkId: userId }).populate(
+      "avatar"
+    );
     if (!callerUser) {
       throw new Error("User not found in database");
     }
@@ -385,12 +401,12 @@ export async function initiateCall(params: {
         select: "clerkId full_name username avatar _id",
         populate: {
           path: "avatar",
-          select: "url publicId"
-        }
+          select: "url publicId",
+        },
       })
       .populate({
         path: "avatar",
-        select: "url publicId"
+        select: "url publicId",
       });
 
     if (!conversation) {
@@ -438,7 +454,7 @@ export async function initiateCall(params: {
         callerId: userId,
         type,
         status: "ongoing",
-        participants: participants.map((p:any) => p.user.toString()),
+        participants: participants.map((p: any) => p.user.toString()),
       });
     }
 
@@ -446,14 +462,14 @@ export async function initiateCall(params: {
       (p: any) => p.clerkId !== userId
     );
 
-    const callerName = callerUser.full_name || 
-                       `${clerkCaller.firstName || ""} ${clerkCaller.lastName || ""}`.trim() || 
-                       callerUser.username || 
-                       "Unknown User";
-    
-    const callerAvatar = (callerUser.avatar as any)?.url || 
-                         clerkCaller.imageUrl || 
-                         "";
+    const callerName =
+      callerUser.full_name ||
+      `${clerkCaller.firstName || ""} ${clerkCaller.lastName || ""}`.trim() ||
+      callerUser.username ||
+      "Unknown User";
+
+    const callerAvatar =
+      (callerUser.avatar as any)?.url || clerkCaller.imageUrl || "";
 
     let displayName = "";
     let displayAvatar = "";
@@ -503,7 +519,7 @@ export async function initiateCall(params: {
         conversationAvatar: displayAvatar,
         participantsCount: call.participants.length - 1,
       },
-    }).catch(err => console.error("⚠️ Async notification error:", err));
+    }).catch((err) => console.error("⚠️ Async notification error:", err));
 
     return {
       success: true,
@@ -525,8 +541,6 @@ export async function initiateCall(params: {
     throw new Error(error.message || "Failed to initiate call");
   }
 }
-
-
 
 /**
  * Answer a call
@@ -759,36 +773,8 @@ export async function endCall(params: {
 
     const isCaller = call.caller.toString() === mongoUser._id.toString();
     const conversation = call.conversation as any;
-    
-    // ⭐ Check if message already exists
-    const existingCallLogMessage = await Message.findOne({
-      conversation: conversation._id,
-      "metadata.call_id": callId,
-      "metadata.action": "call_log",
-    });
 
-    console.log("🔍 Existing message:", existingCallLogMessage ? "FOUND" : "NOT FOUND");
-
-    // ⭐ Determine call outcome based on CURRENT status
-    let callOutcome: "ended" | "rejected" | "missed" = "ended";
-    const previousStatus = call.status;
-    
-    if (call.status === "rejected") {
-      callOutcome = "rejected";
-    } else if (call.status === "ringing") {
-      callOutcome = "missed";
-    } else if (call.status === "ongoing") {
-      callOutcome = "ended";
-    } else if (call.status === "ended" || call.status === "missed") {
-      // Already ended/missed, determine outcome from stored data
-      callOutcome = call.status === "missed" ? "missed" : "ended";
-    }
-
-    console.log("📊 Call outcome:", callOutcome, "Previous status:", previousStatus);
-
-    const clerk = await clerkClient();
-    const clerkUser = await clerk.users.getUser(userId);
-
+    // ⭐ TÍNH callDuration TRƯỚC KHI DÙNG
     let callDuration = duration || call.duration;
     if (!callDuration && call.startedAt) {
       const endTime = call.endedAt || new Date();
@@ -799,9 +785,69 @@ export async function endCall(params: {
     }
     console.log("⏱️ Call duration:", callDuration);
 
+    // ⭐ Check if message already exists
+    const existingCallLogMessage = await Message.findOne({
+      conversation: conversation._id,
+      "metadata.call_id": callId,
+      "metadata.action": "call_log",
+    });
+
+    console.log(
+      "🔍 Existing message:",
+      existingCallLogMessage ? "FOUND" : "NOT FOUND"
+    );
+
+    // ⭐ Xác định call outcome dựa trên thực tế cuộc gọi
+    let callOutcome: "ended" | "rejected" | "missed" = "ended";
+
+    // Kiểm tra xem có ai đã join call không (ngoài caller)
+    const hasOtherParticipants = call.participants.length > 1;
+    const hadConversation = callDuration && callDuration > 0;
+
+    if (call.status === "rejected") {
+      callOutcome = "rejected";
+    } else if (call.status === "ringing") {
+      // Vẫn đang ringing = không ai bắt máy
+      callOutcome = "missed";
+    } else if (
+      call.status === "ongoing" ||
+      hasOtherParticipants ||
+      hadConversation
+    ) {
+      // Nếu đang ongoing HOẶC có người đã join HOẶC có duration
+      // → Cuộc gọi đã diễn ra thực sự
+      callOutcome = "ended";
+    } else if (call.status === "ended" || call.status === "missed") {
+      // Đã kết thúc rồi, kiểm tra lại xem có thực sự là missed không
+      if (hasOtherParticipants || hadConversation) {
+        callOutcome = "ended"; // Có người join hoặc có duration = không phải missed
+      } else {
+        callOutcome = "missed"; // Không ai join và không có duration = missed
+      }
+    }
+
+    console.log(
+      "📊 Call outcome:",
+      callOutcome,
+      "Current status:",
+      call.status
+    );
+
+    const clerk = await clerkClient();
+    const clerkUser = await clerk.users.getUser(userId);
+
     // ⭐ Update call status if not already finalized
-    if (call.status !== "ended" && call.status !== "rejected" && call.status !== "missed") {
-      call.status = callOutcome === "missed" ? "missed" : callOutcome === "rejected" ? "rejected" : "ended";
+    if (
+      call.status !== "ended" &&
+      call.status !== "rejected" &&
+      call.status !== "missed"
+    ) {
+      call.status =
+        callOutcome === "missed"
+          ? "missed"
+          : callOutcome === "rejected"
+          ? "rejected"
+          : "ended";
       call.endedAt = new Date();
       call.endedBy = mongoUser._id;
       if (callDuration) {
@@ -815,7 +861,9 @@ export async function endCall(params: {
 
     // ⭐ CRITICAL FIX: Caller creates message if it doesn't exist
     if (isCaller && !existingCallLogMessage) {
-      console.log(`📝 Creating call log message (caller, outcome: ${callOutcome})...`);
+      console.log(
+        `📝 Creating call log message (caller, outcome: ${callOutcome})...`
+      );
 
       const messageId = await createCallLogMessage({
         conversationId: conversation._id.toString(),
@@ -844,14 +892,13 @@ export async function endCall(params: {
     };
 
     if (conversation && conversation.participants) {
-      console.log(`📤 Emitting callEnded to ${conversation.participants.length} participants`);
+      console.log(
+        `📤 Emitting callEnded to ${conversation.participants.length} participants`
+      );
       for (const participant of conversation.participants) {
         await emitToUserRoom("callEnded", participant.clerkId, callEndedData);
       }
     }
-
-    // ❌ REMOVED: requestCallRecording emission
-    // Real-time emotion analysis handles this during the call
 
     console.log("🔔 ========== END CALL COMPLETED ==========");
     return {
