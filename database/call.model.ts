@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// src/database/models/call.model.ts - UPDATED WITH REALTIME EMOTION TRACKING
+// src/database/models/call.model.ts - FIXED WITH channelName FIELD
 import mongoose, { Document, model, models, Schema } from "mongoose";
 
 export interface ICallParticipant {
@@ -11,11 +11,10 @@ export interface ICallParticipant {
   is_video_enabled?: boolean;
 }
 
-// ⭐ NEW: Interface for realtime emotion data
 export interface IRealtimeEmotion {
   user: mongoose.Types.ObjectId;
-  emotion: string; // joy, sadness, anger, fear, surprise, neutral
-  confidence: number; // 0-1
+  emotion: string;
+  confidence: number;
   emotion_scores: {
     joy: number;
     sadness: number;
@@ -33,7 +32,6 @@ export interface IRealtimeEmotion {
   };
 }
 
-// ⭐ NEW: Interface for emotion summary per participant
 export interface IParticipantEmotionSummary {
   user: mongoose.Types.ObjectId;
   dominant_emotion: string;
@@ -55,33 +53,33 @@ export interface ICall extends Document {
   participants: ICallParticipant[];
   type: "audio" | "video";
   is_group_call: boolean;
+  channelName: string; // ⭐ FIX: Add channelName field
   status: "ringing" | "ongoing" | "ended" | "declined" | "missed" | "cancelled" | "rejected";
   started_at: Date;
   ended_at?: Date;
+  endedBy?: mongoose.Types.ObjectId; // ⭐ FIX: Add endedBy field (used in call.actions.ts)
   duration?: number;
 
-  // ⭐ DEPRECATED: Recording URLs (kept for backward compatibility)
+  // DEPRECATED fields
   recording_audio_url?: string;
   recording_video_url?: string;
   recording_duration?: number;
   recording_uploaded_at?: Date;
-
-  // ⭐ DEPRECATED: Single emotion analysis (replaced by realtime tracking)
   emotion_analysis?: {
     emotion: string;
     confidence: number;
     analyzed_at: Date;
   };
 
-  // ⭐ NEW: Realtime emotion tracking
+  // Realtime emotion tracking
   realtime_emotions: IRealtimeEmotion[];
   
-  // ⭐ NEW: Emotion summary (calculated when call ends)
+  // Emotion summary
   emotion_summary?: {
-    most_common_emotion: string; // Overall most common emotion
-    average_confidence: number; // Average confidence across all analyses
-    total_analyses: number; // Total number of emotion samples captured
-    emotion_distribution: { // Overall distribution
+    most_common_emotion: string;
+    average_confidence: number;
+    total_analyses: number;
+    emotion_distribution: {
       joy: number;
       sadness: number;
       anger: number;
@@ -89,8 +87,8 @@ export interface ICall extends Document {
       surprise: number;
       neutral: number;
     };
-    participants_emotions: IParticipantEmotionSummary[]; // Per-participant summaries
-    timeline?: Array<{ // Emotion changes over time
+    participants_emotions: IParticipantEmotionSummary[];
+    timeline?: Array<{
       timestamp: Date;
       emotion: string;
       user: mongoose.Types.ObjectId;
@@ -100,7 +98,7 @@ export interface ICall extends Document {
   created_at: Date;
   updated_at: Date;
 
-  // ⭐ NEW: Instance methods
+  // Instance methods
   addRealtimeEmotion(emotionData: Partial<IRealtimeEmotion>): Promise<this>;
   calculateEmotionSummary(): Promise<this>;
   getParticipantEmotions(userId: string): IRealtimeEmotion[];
@@ -112,7 +110,11 @@ const CallSchema = new Schema<ICall>({
     ref: "Conversation",
     required: true,
   },
-  caller: { type: Schema.Types.ObjectId, ref: "User", required: true },
+  caller: { 
+    type: Schema.Types.ObjectId, 
+    ref: "User", 
+    required: true 
+  },
   participants: [
     {
       user: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -127,18 +129,43 @@ const CallSchema = new Schema<ICall>({
       is_video_enabled: { type: Boolean, default: true },
     },
   ],
-  type: { type: String, enum: ["audio", "video"], required: true },
-  is_group_call: { type: Boolean, default: false },
+  type: { 
+    type: String, 
+    enum: ["audio", "video"], 
+    required: true 
+  },
+  is_group_call: { 
+    type: Boolean, 
+    default: false 
+  },
+  // ⭐ FIX: Add channelName field to schema
+  channelName: { 
+    type: String, 
+    required: true,
+    index: true // Index for faster lookups
+  },
   status: {
     type: String,
     enum: ["ringing", "ongoing", "ended", "declined", "missed", "cancelled", "rejected"],
     default: "ringing",
   },
-  started_at: { type: Date, default: Date.now },
-  ended_at: { type: Date },
-  duration: { type: Number },
+  started_at: { 
+    type: Date, 
+    default: Date.now 
+  },
+  ended_at: { 
+    type: Date 
+  },
+  // ⭐ FIX: Add endedBy field
+  endedBy: { 
+    type: Schema.Types.ObjectId, 
+    ref: "User" 
+  },
+  duration: { 
+    type: Number 
+  },
 
-  // DEPRECATED fields (kept for backward compatibility)
+  // DEPRECATED fields
   recording_audio_url: { type: String },
   recording_video_url: { type: String },
   recording_duration: { type: Number },
@@ -149,7 +176,7 @@ const CallSchema = new Schema<ICall>({
     analyzed_at: { type: Date },
   },
 
-  // ⭐ NEW: Realtime emotion tracking
+  // Realtime emotion tracking
   realtime_emotions: [
     {
       user: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -173,7 +200,7 @@ const CallSchema = new Schema<ICall>({
     },
   ],
 
-  // ⭐ NEW: Emotion summary
+  // Emotion summary
   emotion_summary: {
     most_common_emotion: { type: String },
     average_confidence: { type: Number },
@@ -216,7 +243,7 @@ const CallSchema = new Schema<ICall>({
 });
 
 // ============================================
-// INDEXES - Optimized for realtime queries
+// INDEXES
 // ============================================
 CallSchema.index({ conversation: 1, created_at: -1 });
 CallSchema.index({ caller: 1, created_at: -1 });
@@ -226,8 +253,11 @@ CallSchema.index({ is_group_call: 1, type: 1 });
 CallSchema.index({ started_at: -1 });
 CallSchema.index({ conversation: 1, status: 1 });
 CallSchema.index({ "participants.user": 1, status: 1 });
+// ⭐ NEW: Index for channelName lookups
+CallSchema.index({ channelName: 1 });
+CallSchema.index({ channelName: 1, status: 1 });
 
-// ⭐ NEW: Indexes for emotion queries
+// Emotion indexes
 CallSchema.index({ "realtime_emotions.user": 1 });
 CallSchema.index({ "realtime_emotions.emotion": 1 });
 CallSchema.index({ "realtime_emotions.timestamp": -1 });
@@ -241,7 +271,6 @@ CallSchema.pre("save", function (next) {
   this.updated_at = new Date();
   this.is_group_call = this.participants.length > 2;
 
-  // Calculate duration when call ends
   if (
     this.status === "ended" &&
     this.started_at &&
@@ -253,7 +282,6 @@ CallSchema.pre("save", function (next) {
     );
   }
 
-  // Validation
   if (this.is_group_call) {
     if (this.participants.length < 2) {
       return next(new Error("Group calls must have at least 2 participants"));
@@ -271,12 +299,9 @@ CallSchema.pre("save", function (next) {
 });
 
 // ============================================
-// ⭐ NEW INSTANCE METHODS - Realtime Emotion
+// INSTANCE METHODS
 // ============================================
 
-/**
- * Add a realtime emotion sample
- */
 CallSchema.methods.addRealtimeEmotion = async function (
   emotionData: Partial<IRealtimeEmotion>
 ) {
@@ -307,9 +332,6 @@ CallSchema.methods.addRealtimeEmotion = async function (
   return this.save();
 };
 
-/**
- * Calculate emotion summary (call when ending)
- */
 CallSchema.methods.calculateEmotionSummary = async function () {
   if (this.realtime_emotions.length === 0) {
     console.log("⚠️ No emotion data to summarize");
@@ -318,7 +340,6 @@ CallSchema.methods.calculateEmotionSummary = async function () {
 
   console.log(`📊 Calculating emotion summary for ${this.realtime_emotions.length} samples...`);
 
-  // Count all emotions
   const emotionCounts: Record<string, number> = {};
   let totalConfidence = 0;
   const emotionDistribution = {
@@ -330,10 +351,8 @@ CallSchema.methods.calculateEmotionSummary = async function () {
     neutral: 0,
   };
 
-  // Type definition for participantData
   type EmotionDistribution = typeof emotionDistribution;
   
-  // ✅ FIX: Đây là dòng bị lỗi - thiếu dấu 
   const participantData: Record<
     string,
     {
@@ -345,21 +364,17 @@ CallSchema.methods.calculateEmotionSummary = async function () {
 
   const timeline: Array<{ timestamp: Date; emotion: string; user: mongoose.Types.ObjectId }> = [];
 
-  // Process all emotion samples
   this.realtime_emotions.forEach((emotion: IRealtimeEmotion) => {
     const userId = emotion.user.toString();
 
-    // Overall counts
     emotionCounts[emotion.emotion] = (emotionCounts[emotion.emotion] || 0) + 1;
     totalConfidence += emotion.confidence;
 
-    // Distribution
     Object.keys(emotionDistribution).forEach((key) => {
       emotionDistribution[key as keyof typeof emotionDistribution] +=
         emotion.emotion_scores[key as keyof typeof emotionDistribution] || 0;
     });
 
-    // Per-participant
     if (!participantData[userId]) {
       participantData[userId] = { emotions: [], confidences: [], scores: [] };
     }
@@ -367,7 +382,6 @@ CallSchema.methods.calculateEmotionSummary = async function () {
     participantData[userId].confidences.push(emotion.confidence);
     participantData[userId].scores.push(emotion.emotion_scores);
 
-    // Timeline
     timeline.push({
       timestamp: emotion.timestamp,
       emotion: emotion.emotion,
@@ -375,18 +389,14 @@ CallSchema.methods.calculateEmotionSummary = async function () {
     });
   });
 
-  // Calculate most common emotion
   const mostCommonEmotion = Object.entries(emotionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutral";
-
   const totalAnalyses = this.realtime_emotions.length;
   const avgConfidence = totalConfidence / totalAnalyses;
 
-  // Normalize distribution
   Object.keys(emotionDistribution).forEach((key) => {
     emotionDistribution[key as keyof typeof emotionDistribution] /= totalAnalyses;
   });
 
-  // Calculate per-participant summaries
   const participantsSummaries: IParticipantEmotionSummary[] = Object.entries(participantData).map(
     ([userId, data]) => {
       const counts: Record<string, number> = {};
@@ -397,7 +407,6 @@ CallSchema.methods.calculateEmotionSummary = async function () {
       const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutral";
       const avgConf = data.confidences.reduce((a, b) => a + b, 0) / data.confidences.length;
 
-      // Calculate distribution for this participant
       const dist: EmotionDistribution = {
         joy: 0,
         sadness: 0,
@@ -413,7 +422,6 @@ CallSchema.methods.calculateEmotionSummary = async function () {
         });
       });
 
-      // Normalize
       Object.keys(dist).forEach((key) => {
         dist[key as keyof EmotionDistribution] /= data.scores.length;
       });
@@ -428,10 +436,8 @@ CallSchema.methods.calculateEmotionSummary = async function () {
     }
   );
 
-  // Sort timeline
   timeline.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
-  // Update emotion_summary
   this.emotion_summary = {
     most_common_emotion: mostCommonEmotion,
     average_confidence: avgConfidence,
@@ -446,18 +452,12 @@ CallSchema.methods.calculateEmotionSummary = async function () {
   return this.save();
 };
 
-/**
- * Get all emotions for a specific participant
- */
 CallSchema.methods.getParticipantEmotions = function (userId: string): IRealtimeEmotion[] {
   return this.realtime_emotions.filter(
     (emotion: IRealtimeEmotion) => emotion.user.toString() === userId
   );
 };
 
-// ============================================
-// EXISTING INSTANCE METHODS (unchanged)
-// ============================================
 CallSchema.methods.addParticipant = function (userId: string) {
   const existingParticipant = this.participants.find(
     (p: any) => p.user.toString() === userId
@@ -518,7 +518,6 @@ CallSchema.methods.endCall = async function () {
     }
   });
 
-  // ⭐ NEW: Calculate emotion summary when ending call
   if (this.realtime_emotions.length > 0) {
     await this.calculateEmotionSummary();
   }
@@ -537,8 +536,9 @@ CallSchema.methods.getCaller = function () {
 };
 
 // ============================================
-// EXISTING STATIC METHODS (unchanged)
+// STATIC METHODS
 // ============================================
+
 CallSchema.statics.getUserCallHistory = function (userId: string, options: any = {}) {
   const { page = 1, limit = 20, is_group_call, type, status, date_from, date_to } = options;
   const skip = (page - 1) * limit;
@@ -705,7 +705,6 @@ CallSchema.statics.getCallStatistics = function (
   ]);
 };
 
-// ⭐ UPDATED: Get calls with emotion (now uses emotion_summary)
 CallSchema.statics.getCallsWithEmotion = function (
   userId: string,
   emotion?: string,
@@ -716,7 +715,7 @@ CallSchema.statics.getCallsWithEmotion = function (
 
   const query: any = {
     $or: [{ caller: userId }, { "participants.user": userId }],
-    "emotion_summary.total_analyses": { $gt: 0 }, // Has emotion data
+    "emotion_summary.total_analyses": { $gt: 0 },
   };
 
   if (emotion) {
@@ -732,7 +731,6 @@ CallSchema.statics.getCallsWithEmotion = function (
     .limit(limit);
 };
 
-// ⭐ NEW: Get emotion timeline for a call
 CallSchema.statics.getCallEmotionTimeline = function (callId: string) {
   return this.findById(callId)
     .select("emotion_summary.timeline realtime_emotions")
