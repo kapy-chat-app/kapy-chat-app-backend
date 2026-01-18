@@ -429,43 +429,67 @@ export async function initiateCall(params: {
     const clerkCaller = await clerk.users.getUser(userId);
 
     // ⭐ FIX: Check if there's an ongoing call in this conversation
-    const existingCall = await Call.findOne({
+    let existingCall = await Call.findOne({
       conversation: conversationId,
       status: { $in: ["ringing", "ongoing"] },
     });
+
+    // ✅ FIX B: cleanup stuck / ghost call
+    if (existingCall) {
+      const now = Date.now();
+      const started = existingCall.startedAt
+        ? new Date(existingCall.startedAt).getTime()
+        : 0;
+
+      const isExpired = started > 0 && now - started > 60 * 1000; // 60s timeout
+      const ghostParticipants =
+        !existingCall.participants || existingCall.participants.length <= 1;
+
+      // ✅ nếu đang ringing quá lâu -> coi như missed
+      if (existingCall.status === "ringing" && isExpired) {
+        console.log("🧹 Cleaning expired ringing call:", existingCall._id);
+
+        existingCall.status = "missed";
+        existingCall.endedAt = new Date();
+        await existingCall.save();
+
+        existingCall = null;
+      }
+
+      // ✅ nếu ongoing mà ghost (<=1 người) & quá lâu -> end
+      if (
+        existingCall &&
+        existingCall.status === "ongoing" &&
+        ghostParticipants &&
+        isExpired
+      ) {
+        console.log("🧹 Cleaning ghost ongoing call:", existingCall._id);
+
+        existingCall.status = "ended";
+        existingCall.endedAt = new Date();
+        await existingCall.save();
+
+        existingCall = null;
+      }
+    }
+
+    // ✅ Query lại lần 2 cho chắc chắn
+    const validCall = existingCall
+      ? existingCall
+      : await Call.findOne({
+          conversation: conversationId,
+          status: { $in: ["ringing", "ongoing"] },
+        });
 
     let call;
     let channelName;
     let isJoiningExisting = false;
 
-    if (existingCall) {
-      console.log("📞 Joining existing call:", existingCall._id);
+    if (validCall) {
+      console.log("📞 Joining existing call:", validCall._id);
 
-      // Check if user already in call
-      const alreadyInCall = existingCall.participants.some(
-        (p: any) => p.user.toString() === callerUser._id.toString()
-      );
-
-      if (!alreadyInCall) {
-        // Add user to existing call
-        existingCall.participants.push({
-          user: callerUser._id,
-          joinedAt: new Date(),
-        });
-
-        if (existingCall.status === "ringing") {
-          existingCall.status = "ongoing";
-        }
-
-        await existingCall.save();
-
-        console.log("✅ User added to existing call");
-      } else {
-        console.log("✅ User already in call");
-      }
-
-      call = existingCall;
-      channelName = existingCall.channelName;
+      call = validCall;
+      channelName = validCall.channelName; // ✅ quan trọng
       isJoiningExisting = true;
     } else {
       // Create new call
@@ -583,7 +607,7 @@ export async function initiateCall(params: {
       success: true,
       call: {
         id: call._id.toString(),
-        channelName,
+        channelName: channelName || call.channelName,
         type,
         status: call.status,
         conversationId,
