@@ -1,7 +1,7 @@
-// server.js - FIXED TYPING INDICATOR
-// ✅ Separate events: sendTypingIndicator (client->server) vs userTyping (server->client)
-// ✅ Proper room broadcasting
-// ✅ Debug logging
+// server.js - FIXED GROUP CALL SOCKET EVENTS
+// ✅ Proper participant tracking
+// ✅ Only emit to users not in call
+// ✅ Handle rejoin scenarios
 
 import { fileURLToPath } from "url";
 import { dirname } from "path";
@@ -64,8 +64,11 @@ const userUpdateDebounce = new Map();
 const lastApiCall = new Map();
 const API_THROTTLE = 30000;
 
-// ✅ TYPING STATE TRACKING (để debug)
+// ✅ TYPING STATE TRACKING
 const activeTypers = new Map(); // conversationId -> Set<userId>
+
+// ⭐ NEW: CALL PARTICIPANTS TRACKING
+const callParticipants = new Map(); // callId -> Set<userId>
 
 async function updateUserLastSeen(user_id, is_online, last_seen) {
   const now = Date.now();
@@ -356,7 +359,8 @@ app.prepare().then(() => {
       });
     });
 
-    socket.on("joinCallRoom", ({ callId, conversationId }) => {
+    // ⭐ FIXED: Track call participants
+    socket.on("joinCallRoom", ({ callId, conversationId, userId }) => {
       if (!callId) {
         console.error("❌ Missing callId in joinCallRoom");
         socket.emit("error", { message: "callId is required" });
@@ -366,8 +370,17 @@ app.prepare().then(() => {
       const callRoom = `call:${callId}`;
       socket.join(callRoom);
 
-      if (shouldLog("debug")) {
-        console.log(`📞 Socket ${socket.id} joined call room: ${callRoom}`);
+      // Track participant
+      if (userId) {
+        if (!callParticipants.has(callId)) {
+          callParticipants.set(callId, new Set());
+        }
+        callParticipants.get(callId).add(userId);
+
+        console.log(
+          `📞 User ${userId} joined call room: ${callRoom}, total in call:`,
+          callParticipants.get(callId).size
+        );
       }
 
       socket.emit("joinedCallRoom", {
@@ -378,7 +391,7 @@ app.prepare().then(() => {
       });
     });
 
-    socket.on("leaveCallRoom", ({ callId }) => {
+    socket.on("leaveCallRoom", ({ callId, userId }) => {
       if (!callId) {
         console.error("❌ Missing callId in leaveCallRoom");
         return;
@@ -387,8 +400,20 @@ app.prepare().then(() => {
       const callRoom = `call:${callId}`;
       socket.leave(callRoom);
 
-      if (shouldLog("debug")) {
-        console.log(`📞 Socket ${socket.id} left call room: ${callRoom}`);
+      // Remove from participants
+      if (userId && callParticipants.has(callId)) {
+        callParticipants.get(callId).delete(userId);
+
+        console.log(
+          `📞 User ${userId} left call room: ${callRoom}, remaining:`,
+          callParticipants.get(callId).size
+        );
+
+        // Clean up if no participants
+        if (callParticipants.get(callId).size === 0) {
+          callParticipants.delete(callId);
+          console.log(`🧹 Cleaned up call tracking for: ${callId}`);
+        }
       }
 
       socket.emit("leftCallRoom", {
@@ -399,7 +424,7 @@ app.prepare().then(() => {
     });
 
     // ==========================================
-    // ✅ TYPING INDICATOR - FIXED VERSION
+    // ✅ TYPING INDICATOR
     // ==========================================
     socket.on(
       "sendTypingIndicator",
@@ -431,7 +456,7 @@ app.prepare().then(() => {
           user.lastActive = Date.now();
         }
 
-        // ✅ CRITICAL: Broadcast to ROOM except sender
+        // Broadcast to ROOM except sender
         const room = `conversation:${conversation_id}`;
         const eventData = {
           conversation_id,
@@ -446,13 +471,6 @@ app.prepare().then(() => {
         console.log(
           `⌨️ [SERVER] ✅ Broadcasted typing to room ${room}, event:`,
           eventData
-        );
-
-        // Log room members for debugging
-        const roomSockets = io.sockets.adapter.rooms.get(room);
-        console.log(
-          `⌨️ [SERVER] Room ${room} has ${roomSockets?.size || 0} members:`,
-          roomSockets ? Array.from(roomSockets) : []
         );
       }
     );
@@ -682,6 +700,20 @@ app.prepare().then(() => {
         }
       });
 
+      // Clean up call participants
+      callParticipants.forEach((participants, callId) => {
+        if (participants.has(user_id)) {
+          participants.delete(user_id);
+          console.log(
+            `📞 [SERVER] Removed ${user_id} from call ${callId} due to disconnect`
+          );
+
+          if (participants.size === 0) {
+            callParticipants.delete(callId);
+          }
+        }
+      });
+
       setTimeout(async () => {
         const stillConnected = onlineUsers.find((u) => u.userId === user_id);
         if (stillConnected?.socketId === socket.id) {
@@ -762,5 +794,6 @@ app.prepare().then(() => {
     console.log(`🤖 AI Emotion Analysis: Enabled`);
     console.log(`✅ Active User Tracking: Enabled & Optimized`);
     console.log(`⌨️ Typing Indicator: ✅ FIXED & ENABLED`);
+    console.log(`📞 Group Call Tracking: ✅ ENABLED`);
   });
 });

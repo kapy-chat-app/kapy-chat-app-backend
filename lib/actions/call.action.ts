@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// lib/actions/call.actions.ts - UPDATED FOR REAL-TIME EMOTION
+// lib/actions/call.actions.ts - FIXED GROUP CALL LOGIC
 "use server";
 
 import { connectToDatabase } from "@/lib/mongoose";
@@ -17,6 +17,7 @@ import {
 import { sendCallNotification as sendExpoCallNotification } from "../pushNotification";
 import Message from "@/database/message.model";
 import mongoose from "mongoose";
+
 /**
  * ⭐ UPDATED: Create call log message with different statuses
  */
@@ -376,7 +377,7 @@ async function sendCallNotificationsAsync(params: {
 }
 
 /**
- * Initiate a new call - WITH FCM SUPPORT
+ * ⭐ FIXED: Initiate a new call - ONLY send notifications to users NOT in call
  */
 export async function initiateCall(params: {
   userId: string;
@@ -427,40 +428,80 @@ export async function initiateCall(params: {
     const clerk = await clerkClient();
     const clerkCaller = await clerk.users.getUser(userId);
 
-    const channelName = `call_${conversationId}_${Date.now()}`;
-
-    const participants = conversation.participants.map((p: any) => ({
-      user: p._id,
-      joinedAt: new Date(),
-    }));
-
-    const call = await Call.create({
+    // ⭐ FIX: Check if there's an ongoing call in this conversation
+    const existingCall = await Call.findOne({
       conversation: conversationId,
-      caller: callerUser._id,
-      type,
-      channelName,
-      status: "ringing",
-      startedAt: new Date(),
-      participants: participants,
+      status: { $in: ["ringing", "ongoing"] },
     });
 
-    console.log(`📞 Call initiated: ${call._id} by ${callerUser._id}`);
+    let call;
+    let channelName;
+    let isJoiningExisting = false;
 
-    // Create "Call in progress" message for GROUP calls
-    if (conversation.type === "group") {
-      await createCallLogMessage({
-        conversationId,
-        callId: call._id.toString(),
-        callerId: userId,
+    if (existingCall) {
+      console.log("📞 Joining existing call:", existingCall._id);
+
+      // Check if user already in call
+      const alreadyInCall = existingCall.participants.some(
+        (p: any) => p.user.toString() === callerUser._id.toString()
+      );
+
+      if (!alreadyInCall) {
+        // Add user to existing call
+        existingCall.participants.push({
+          user: callerUser._id,
+          joinedAt: new Date(),
+        });
+
+        if (existingCall.status === "ringing") {
+          existingCall.status = "ongoing";
+        }
+
+        await existingCall.save();
+
+        console.log("✅ User added to existing call");
+      } else {
+        console.log("✅ User already in call");
+      }
+
+      call = existingCall;
+      channelName = existingCall.channelName;
+      isJoiningExisting = true;
+    } else {
+      // Create new call
+      console.log("📞 Creating new call");
+
+      channelName = `call_${conversationId}_${Date.now()}`;
+
+      const participants = conversation.participants.map((p: any) => ({
+        user: p._id,
+        joinedAt: new Date(),
+      }));
+
+      call = await Call.create({
+        conversation: conversationId,
+        caller: callerUser._id,
         type,
-        status: "ongoing",
-        participants: participants.map((p: any) => p.user.toString()),
+        channelName,
+        status: "ringing",
+        startedAt: new Date(),
+        participants: participants,
       });
-    }
 
-    const otherParticipants = conversation.participants.filter(
-      (p: any) => p.clerkId !== userId
-    );
+      console.log(`📞 Call initiated: ${call._id} by ${callerUser._id}`);
+
+      // Create "Call in progress" message for GROUP calls
+      if (conversation.type === "group") {
+        await createCallLogMessage({
+          conversationId,
+          callId: call._id.toString(),
+          callerId: userId,
+          type,
+          status: "ongoing",
+          participants: participants.map((p: any) => p.user.toString()),
+        });
+      }
+    }
 
     const callerName =
       callerUser.full_name ||
@@ -497,29 +538,46 @@ export async function initiateCall(params: {
       display_avatar: displayAvatar,
     };
 
+    // ⭐ FIX: Only notify users NOT already in the call
+    const usersInCall = new Set(
+      call.participants.map((p: any) => p.user.toString())
+    );
+
+    const otherParticipants = conversation.participants.filter((p: any) => {
+      const participantMongoId = p._id.toString();
+      const isInCall = usersInCall.has(participantMongoId);
+      const isCaller = p.clerkId === userId;
+
+      return !isCaller && !isInCall; // ✅ Only users NOT in call
+    });
+
+    console.log(`📞 Notifying ${otherParticipants.length} users not in call`);
+
     // Emit socket event (for app already running)
     for (const participant of otherParticipants) {
       if (!participant.clerkId) continue;
       await emitToUserRoom("incomingCall", participant.clerkId, callData);
     }
 
-    // ⭐ UPDATED: Send push notifications with FCM/Expo detection
-    sendCallNotificationsAsync({
-      otherParticipants,
-      callData: {
-        callerName: displayName,
-        callType: type,
-        callId: call._id.toString(),
-        channelName,
-        conversationId,
-        callerId: userId,
-        callerAvatar: displayAvatar,
-        conversationType: conversation.type,
-        conversationName: conversation.name || displayName,
-        conversationAvatar: displayAvatar,
-        participantsCount: call.participants.length - 1,
-      },
-    }).catch((err) => console.error("⚠️ Async notification error:", err));
+    // ⭐ Send push notifications ONLY to users not in call
+    if (otherParticipants.length > 0) {
+      sendCallNotificationsAsync({
+        otherParticipants,
+        callData: {
+          callerName: displayName,
+          callType: type,
+          callId: call._id.toString(),
+          channelName,
+          conversationId,
+          callerId: userId,
+          callerAvatar: displayAvatar,
+          conversationType: conversation.type,
+          conversationName: conversation.name || displayName,
+          conversationAvatar: displayAvatar,
+          participantsCount: call.participants.length - 1,
+        },
+      }).catch((err) => console.error("⚠️ Async notification error:", err));
+    }
 
     return {
       success: true,
@@ -535,6 +593,7 @@ export async function initiateCall(params: {
         name: callerName,
         avatar: callerAvatar,
       },
+      isJoiningExisting, // ⭐ NEW: Flag to indicate if joining existing call
     };
   } catch (error: any) {
     console.error("❌ Error initiating call:", error);
@@ -637,7 +696,7 @@ export async function answerCall(params: { userId: string; callId: string }) {
 }
 
 /**
- * Reject a call
+ * ⭐ FIXED: Reject a call - Group calls continue, private calls end
  */
 export async function rejectCall(params: { userId: string; callId: string }) {
   try {
@@ -669,6 +728,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
     const clerkUser = await clerk.users.getUser(userId);
 
     if (isGroupCall) {
+      // Group call: just reject for this user, don't end call
       if (call.status !== "ringing" && call.status !== "ongoing") {
         throw new Error(`Call has already ${call.status}`);
       }
@@ -682,6 +742,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
         rejection_type: "personal",
       };
 
+      // Only notify the person who rejected
       await emitToUserRoom("callRejected", userId, callRejectedData);
 
       return {
@@ -691,6 +752,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
         message: "You rejected the call, but it continues for others",
       };
     } else {
+      // Private call: end completely
       if (call.status !== "ringing") {
         throw new Error(`Call is already ${call.status}`);
       }
@@ -732,7 +794,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
 }
 
 /**
- * ⭐ UPDATED: End a call - NO MORE requestCallRecording
+ * ⭐ FIXED: End a call - Group calls only end when ≤1 participant remains
  */
 export async function endCall(params: {
   userId: string;
@@ -766,15 +828,14 @@ export async function endCall(params: {
     console.log("✅ Call found:", {
       callId: call._id,
       status: call.status,
-      callerId: call.caller,
-      currentUserId: mongoUser._id,
-      isCaller: call.caller.toString() === mongoUser._id.toString(),
+      currentParticipants: call.participants.length,
     });
 
-    const isCaller = call.caller.toString() === mongoUser._id.toString();
     const conversation = call.conversation as any;
+    const isGroupCall = conversation.type === "group";
+    const isCaller = call.caller.toString() === mongoUser._id.toString();
 
-    // ⭐ TÍNH callDuration TRƯỚC KHI DÙNG
+    // Calculate duration
     let callDuration = duration || call.duration;
     if (!callDuration && call.startedAt) {
       const endTime = call.endedAt || new Date();
@@ -785,128 +846,209 @@ export async function endCall(params: {
     }
     console.log("⏱️ Call duration:", callDuration);
 
-    // ⭐ Check if message already exists
-    const existingCallLogMessage = await Message.findOne({
-      conversation: conversation._id,
-      "metadata.call_id": callId,
-      "metadata.action": "call_log",
-    });
-
-    console.log(
-      "🔍 Existing message:",
-      existingCallLogMessage ? "FOUND" : "NOT FOUND"
-    );
-
-    // ⭐ Xác định call outcome dựa trên thực tế cuộc gọi
-    let callOutcome: "ended" | "rejected" | "missed" = "ended";
-
-    // Kiểm tra xem có ai đã join call không (ngoài caller)
-    const hasOtherParticipants = call.participants.length > 1;
-    const hadConversation = callDuration && callDuration > 0;
-
-    if (call.status === "rejected") {
-      callOutcome = "rejected";
-    } else if (call.status === "ringing") {
-      // Vẫn đang ringing = không ai bắt máy
-      callOutcome = "missed";
-    } else if (
-      call.status === "ongoing" ||
-      hasOtherParticipants ||
-      hadConversation
-    ) {
-      // Nếu đang ongoing HOẶC có người đã join HOẶC có duration
-      // → Cuộc gọi đã diễn ra thực sự
-      callOutcome = "ended";
-    } else if (call.status === "ended" || call.status === "missed") {
-      // Đã kết thúc rồi, kiểm tra lại xem có thực sự là missed không
-      if (hasOtherParticipants || hadConversation) {
-        callOutcome = "ended"; // Có người join hoặc có duration = không phải missed
-      } else {
-        callOutcome = "missed"; // Không ai join và không có duration = missed
-      }
-    }
-
-    console.log(
-      "📊 Call outcome:",
-      callOutcome,
-      "Current status:",
-      call.status
-    );
-
     const clerk = await clerkClient();
     const clerkUser = await clerk.users.getUser(userId);
 
-    // ⭐ Update call status if not already finalized
-    if (
-      call.status !== "ended" &&
-      call.status !== "rejected" &&
-      call.status !== "missed"
-    ) {
-      call.status =
-        callOutcome === "missed"
-          ? "missed"
-          : callOutcome === "rejected"
-          ? "rejected"
-          : "ended";
-      call.endedAt = new Date();
-      call.endedBy = mongoUser._id;
-      if (callDuration) {
-        call.duration = callDuration;
-      }
-      await call.save();
-      console.log(`✅ Call status updated to '${call.status}'`);
-    } else {
-      console.log(`ℹ️ Call already in final state: ${call.status}`);
-    }
+    if (isGroupCall) {
+      console.log("👥 Group call - removing participant");
 
-    // ⭐ CRITICAL FIX: Caller creates message if it doesn't exist
-    if (isCaller && !existingCallLogMessage) {
-      console.log(
-        `📝 Creating call log message (caller, outcome: ${callOutcome})...`
+      // Remove this participant from call
+      call.participants = call.participants.filter(
+        (p: any) => p.user.toString() !== mongoUser._id.toString()
       );
 
-      const messageId = await createCallLogMessage({
-        conversationId: conversation._id.toString(),
-        callId: call._id.toString(),
-        callerId: userId,
-        type: call.type,
-        status: callOutcome,
-        duration: callDuration,
-        participants: call.participants.map((p: any) => p.user.toString()),
+      const remainingParticipants = call.participants.length;
+      console.log("👥 Remaining participants:", remainingParticipants);
+
+      // ⭐ FIX: Only end group call if ≤1 participant remains
+      if (remainingParticipants <= 1) {
+        console.log("🔚 Group call ending - only 1 or fewer participants left");
+
+        call.status = "ended";
+        call.endedAt = new Date();
+        call.endedBy = mongoUser._id;
+        if (callDuration) {
+          call.duration = callDuration;
+        }
+        await call.save();
+
+        // Check if message exists
+        const existingCallLogMessage = await Message.findOne({
+          conversation: conversation._id,
+          "metadata.call_id": callId,
+          "metadata.action": "call_log",
+        });
+
+        // Update call log message
+        if (isCaller && !existingCallLogMessage) {
+          await createCallLogMessage({
+            conversationId: conversation._id.toString(),
+            callId: call._id.toString(),
+            callerId: userId,
+            type: call.type,
+            status: "ended",
+            duration: callDuration,
+            participants: call.participants.map((p: any) => p.user.toString()),
+          });
+        }
+
+        // Notify all participants
+        const callEndedData = {
+          call_id: call._id.toString(),
+          ended_by: userId,
+          ended_by_name: clerkUser.firstName + " " + clerkUser.lastName,
+          ended_by_avatar: clerkUser.imageUrl,
+          duration: callDuration || 0,
+          status: "ended",
+        };
+
+        if (conversation && conversation.participants) {
+          for (const participant of conversation.participants) {
+            await emitToUserRoom(
+              "callEnded",
+              participant.clerkId,
+              callEndedData
+            );
+          }
+        }
+
+        console.log("🔔 ========== END CALL COMPLETED (ENDED) ==========");
+        return {
+          success: true,
+          duration: callDuration || 0,
+          status: "ended",
+          callId: call._id.toString(),
+          message: "Group call ended - you were the last participant",
+        };
+      } else {
+        // Call continues with remaining participants
+        console.log("✅ Group call continues with remaining participants");
+
+        await call.save();
+
+        // Only notify the person who left
+        const userLeftData = {
+          call_id: call._id.toString(),
+          user_id: userId,
+          user_name: clerkUser.firstName + " " + clerkUser.lastName,
+          remaining_participants: remainingParticipants,
+        };
+
+        await emitToUserRoom("userLeftGroupCall", userId, userLeftData);
+
+        // Notify others that this person left (but call continues)
+        for (const participant of conversation.participants) {
+          if (participant.clerkId !== userId) {
+            await emitToUserRoom("participantLeftCall", participant.clerkId, {
+              call_id: call._id.toString(),
+              user_id: userId,
+              user_name: clerkUser.firstName + " " + clerkUser.lastName,
+              remaining_participants: remainingParticipants,
+            });
+          }
+        }
+
+        console.log("🔔 ========== END CALL COMPLETED (LEFT) ==========");
+        return {
+          success: true,
+          status: "ongoing",
+          callId: call._id.toString(),
+          message: "You left the group call",
+        };
+      }
+    } else {
+      // Private call - always end completely
+      console.log("📱 Private call - ending completely");
+
+      // Determine call outcome
+      let callOutcome: "ended" | "rejected" | "missed" = "ended";
+      const hasOtherParticipants = call.participants.length > 1;
+      const hadConversation = callDuration && callDuration > 0;
+
+      if (call.status === "rejected") {
+        callOutcome = "rejected";
+      } else if (call.status === "ringing") {
+        callOutcome = "missed";
+      } else if (
+        call.status === "ongoing" ||
+        hasOtherParticipants ||
+        hadConversation
+      ) {
+        callOutcome = "ended";
+      } else if (call.status === "ended" || call.status === "missed") {
+        if (hasOtherParticipants || hadConversation) {
+          callOutcome = "ended";
+        } else {
+          callOutcome = "missed";
+        }
+      }
+
+      console.log("📊 Call outcome:", callOutcome);
+
+      // Update call status
+      if (
+        call.status !== "ended" &&
+        call.status !== "rejected" &&
+        call.status !== "missed"
+      ) {
+        call.status =
+          callOutcome === "missed"
+            ? "missed"
+            : callOutcome === "rejected"
+              ? "rejected"
+              : "ended";
+        call.endedAt = new Date();
+        call.endedBy = mongoUser._id;
+        if (callDuration) {
+          call.duration = callDuration;
+        }
+        await call.save();
+        console.log(`✅ Call status updated to '${call.status}'`);
+      }
+
+      // Create call log message
+      const existingCallLogMessage = await Message.findOne({
+        conversation: conversation._id,
+        "metadata.call_id": callId,
+        "metadata.action": "call_log",
       });
 
-      console.log("✅ Call log message created:", messageId);
-    } else if (!isCaller) {
-      console.log("ℹ️ User is not caller, skipping message creation");
-    } else if (existingCallLogMessage) {
-      console.log("ℹ️ Message already exists, skipping creation");
-    }
-
-    const callEndedData = {
-      call_id: call._id.toString(),
-      ended_by: userId,
-      ended_by_name: clerkUser.firstName + " " + clerkUser.lastName,
-      ended_by_avatar: clerkUser.imageUrl,
-      duration: callDuration || 0,
-      status: call.status,
-    };
-
-    if (conversation && conversation.participants) {
-      console.log(
-        `📤 Emitting callEnded to ${conversation.participants.length} participants`
-      );
-      for (const participant of conversation.participants) {
-        await emitToUserRoom("callEnded", participant.clerkId, callEndedData);
+      if (isCaller && !existingCallLogMessage) {
+        await createCallLogMessage({
+          conversationId: conversation._id.toString(),
+          callId: call._id.toString(),
+          callerId: userId,
+          type: call.type,
+          status: callOutcome,
+          duration: callDuration,
+          participants: call.participants.map((p: any) => p.user.toString()),
+        });
       }
-    }
 
-    console.log("🔔 ========== END CALL COMPLETED ==========");
-    return {
-      success: true,
-      duration: call.duration || callDuration || 0,
-      status: call.status,
-      callId: call._id.toString(),
-    };
+      // Notify all participants
+      const callEndedData = {
+        call_id: call._id.toString(),
+        ended_by: userId,
+        ended_by_name: clerkUser.firstName + " " + clerkUser.lastName,
+        ended_by_avatar: clerkUser.imageUrl,
+        duration: callDuration || 0,
+        status: call.status,
+      };
+
+      if (conversation && conversation.participants) {
+        for (const participant of conversation.participants) {
+          await emitToUserRoom("callEnded", participant.clerkId, callEndedData);
+        }
+      }
+
+      console.log("🔔 ========== END CALL COMPLETED ==========");
+      return {
+        success: true,
+        duration: call.duration || callDuration || 0,
+        status: call.status,
+        callId: call._id.toString(),
+      };
+    }
   } catch (error: any) {
     console.error("❌ Error ending call:", error);
     throw new Error(error.message || "Failed to end call");
