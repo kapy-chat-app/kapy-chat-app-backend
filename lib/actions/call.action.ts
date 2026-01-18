@@ -482,20 +482,29 @@ export async function initiateCall(params: {
         });
 
     let call;
-    let channelName;
+    let channelName: string; // ✅ CRITICAL: Declare as string type
     let isJoiningExisting = false;
 
     if (validCall) {
       console.log("📞 Joining existing call:", validCall._id);
 
       call = validCall;
-      channelName = validCall.channelName; // ✅ quan trọng
+      channelName = validCall.channelName; // ✅ Get from existing call
       isJoiningExisting = true;
+
+      // ✅ CRITICAL: Verify channelName exists from existing call
+      if (!channelName) {
+        console.error("❌ Existing call missing channelName:", validCall);
+        throw new Error("Existing call does not have a valid channelName");
+      }
+
+      console.log("✅ Using existing channelName:", channelName);
     } else {
       // Create new call
       console.log("📞 Creating new call");
 
       channelName = `call_${conversationId}_${Date.now()}`;
+      console.log("✅ Generated new channelName:", channelName);
 
       const participants = conversation.participants.map((p: any) => ({
         user: p._id,
@@ -527,6 +536,15 @@ export async function initiateCall(params: {
       }
     }
 
+    // ✅ CRITICAL: Final validation before return
+    if (!channelName) {
+      console.error("❌ CRITICAL: channelName is undefined before return");
+      console.error("❌ Call object:", call);
+      throw new Error("Failed to determine channelName for call");
+    }
+
+    console.log("📞 Final channelName before return:", channelName);
+
     const callerName =
       callerUser.full_name ||
       `${clerkCaller.firstName || ""} ${clerkCaller.lastName || ""}`.trim() ||
@@ -556,7 +574,7 @@ export async function initiateCall(params: {
       caller_avatar: callerAvatar,
       call_type: type,
       conversation_id: conversationId,
-      channel_name: channelName,
+      channel_name: channelName, // ✅ Use validated channelName
       conversation_type: conversation.type,
       display_name: displayName,
       display_avatar: displayAvatar,
@@ -591,7 +609,7 @@ export async function initiateCall(params: {
           callerName: displayName,
           callType: type,
           callId: call._id.toString(),
-          channelName,
+          channelName, // ✅ Use validated channelName
           conversationId,
           callerId: userId,
           callerAvatar: displayAvatar,
@@ -603,11 +621,14 @@ export async function initiateCall(params: {
       }).catch((err) => console.error("⚠️ Async notification error:", err));
     }
 
+    // ✅ CRITICAL: Return with validated channelName
+    console.log("📞 Returning response with channelName:", channelName);
+
     return {
       success: true,
       call: {
         id: call._id.toString(),
-        channelName: channelName || call.channelName,
+        channelName: channelName, // ✅ Always use the validated variable
         type,
         status: call.status,
         conversationId,
@@ -617,7 +638,7 @@ export async function initiateCall(params: {
         name: callerName,
         avatar: callerAvatar,
       },
-      isJoiningExisting, // ⭐ NEW: Flag to indicate if joining existing call
+      isJoiningExisting, // ⭐ Flag to indicate if joining existing call
     };
   } catch (error: any) {
     console.error("❌ Error initiating call:", error);
