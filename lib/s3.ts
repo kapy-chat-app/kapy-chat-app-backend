@@ -83,6 +83,7 @@ export async function uploadToS3(
       Body: buffer,
       ContentType: fileType || 'application/octet-stream',
       ServerSideEncryption: 'AES256',
+      ACL: 'public-read', // ✅ THÊM DÒNG NÀY để file public
       Metadata: metadata,
     });
 
@@ -93,6 +94,7 @@ export async function uploadToS3(
     const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 
     console.log(`✅ S3 upload success in ${elapsed}s`);
+    console.log(`   Public URL: ${url}`);
 
     return {
       success: true,
@@ -109,7 +111,6 @@ export async function uploadToS3(
     };
   }
 }
-
 // ✅ Upload encrypted file to S3
 export async function uploadEncryptedFileToS3(
   buffer: Buffer,
