@@ -7,7 +7,7 @@ import Call from "@/database/call.model";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { callId: string } }
+  context: { params: Promise<{ callId: string }> }
 ) {
   try {
     const { userId } = await auth();
@@ -18,7 +18,8 @@ export async function GET(
 
     await connectToDatabase();
 
-    const callId = params.callId;
+    // ✅ FIX: Await params in Next.js 15
+    const { callId } = await context.params;
 
     console.log("🔍 [GET /api/calls/details] Fetching call:", callId);
 
