@@ -839,7 +839,7 @@ export async function rejectCall(params: { userId: string; callId: string }) {
 }
 
 /**
- * ⭐ FIXED: End a call - Group calls only end when ≤1 participant remains
+ * ⭐ FIXED: End a call - Group calls only end when ≤1 participant remains BEFORE leaving
  */
 export async function endCall(params: {
   userId: string;
@@ -895,19 +895,36 @@ export async function endCall(params: {
     const clerkUser = await clerk.users.getUser(userId);
 
     if (isGroupCall) {
-      console.log("👥 Group call - removing participant");
+      console.log("👥 Group call - processing leave");
+
+      // ✅ FIX 1: Count BEFORE removing
+      const countBeforeRemoval = call.participants.length;
+      console.log("👥 Participants BEFORE removal:", countBeforeRemoval);
 
       // Remove this participant from call
       call.participants = call.participants.filter(
         (p: any) => p.user.toString() !== mongoUser._id.toString()
       );
 
-      const remainingParticipants = call.participants.length;
-      console.log("👥 Remaining participants:", remainingParticipants);
+      const remainingAfterRemoval = call.participants.length;
+      console.log("👥 Participants AFTER removal:", remainingAfterRemoval);
 
-      // ⭐ FIX: Only end group call if ≤1 participant remains
-      if (remainingParticipants <= 1) {
-        console.log("🔚 Group call ending - only 1 or fewer participants left");
+      // ✅ FIX 2: End only when user is the last one leaving
+      // Changed from: if (remainingAfterRemoval <= 1)
+      // To: if (countBeforeRemoval <= 1)
+      const shouldEndCall = countBeforeRemoval <= 1;
+      
+      console.log("🔍 End call decision:", {
+        countBeforeRemoval,
+        remainingAfterRemoval,
+        shouldEndCall,
+        reason: shouldEndCall 
+          ? "User is last participant leaving" 
+          : `${remainingAfterRemoval} participant(s) still in call`
+      });
+
+      if (shouldEndCall) {
+        console.log("🔚 Group call ending - last participant left");
 
         call.status = "ended";
         call.endedAt = new Date();
@@ -967,7 +984,7 @@ export async function endCall(params: {
         };
       } else {
         // Call continues with remaining participants
-        console.log("✅ Group call continues with remaining participants");
+        console.log(`✅ Group call continues with ${remainingAfterRemoval} participant(s)`);
 
         await call.save();
 
@@ -976,7 +993,7 @@ export async function endCall(params: {
           call_id: call._id.toString(),
           user_id: userId,
           user_name: clerkUser.firstName + " " + clerkUser.lastName,
-          remaining_participants: remainingParticipants,
+          remaining_participants: remainingAfterRemoval,
         };
 
         await emitToUserRoom("userLeftGroupCall", userId, userLeftData);
@@ -988,7 +1005,7 @@ export async function endCall(params: {
               call_id: call._id.toString(),
               user_id: userId,
               user_name: clerkUser.firstName + " " + clerkUser.lastName,
-              remaining_participants: remainingParticipants,
+              remaining_participants: remainingAfterRemoval,
             });
           }
         }
@@ -1099,6 +1116,7 @@ export async function endCall(params: {
     throw new Error(error.message || "Failed to end call");
   }
 }
+
 
 /**
  * ⭐ UPDATED: Get emotion analysis for a call - Real-time data
